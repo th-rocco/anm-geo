@@ -129,7 +129,10 @@ config_geo <- list(
         "https://ftp-pamgia.ibama.gov.br/dados/adm_embargos_ibama_a.zip",
 
       "ibama_autos_de_infracao_p.zip" =
-        "https://ftp-pamgia.ibama.gov.br/dados/ibama_autos_de_infracao_p.zip"#,
+        "https://ftp-pamgia.ibama.gov.br/dados/ibama_autos_de_infracao_p.zip",
+
+      "auto_infracao_csv.zip" =
+        "https://dadosabertos.ibama.gov.br/dados/SIFISC/auto_infracao/auto_infracao/auto_infracao_csv.zip"
     )
   ),
 
@@ -219,3 +222,18 @@ if (length(erros_finais) > 0) {
 } else {
   message("\nTodos os arquivos foram baixados com sucesso.")
 }
+# --- Grava o manifest desta execucao
+manifest_df <- purrr::map_dfr(todos_arquivos, ~ tibble::tibble(
+  target         = .x$target,
+  filename       = .x$filename,
+  url            = .x$url,
+  dest_dir       = .x$dest_dir,
+  success        = .x$success,
+  sha256         = .x$sha256,
+  size_bytes     = .x$size_bytes,
+  attempts_used  = .x$attempts_used,
+  note           = .x$note
+))
+manifest_path <- file.path(MANIFEST_DIR, paste0("download_log_", TS_EXECUCAO, ".csv"))
+readr::write_csv(manifest_df, manifest_path)
+message("\nManifest salvo em: ", manifest_path)

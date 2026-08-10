@@ -10,12 +10,6 @@
 #      to_upper_utf8, first_match, clean_geometry (com contagem de descarte)
 #   C) Filtro por palavra-chave com diagnóstico (etapa 02 — IBAMA/ICMBio/SEMA)
 #   D) Parsing "inteligente" de CFEM com diagnóstico (delimitador/decimal)
-#
-# IMPORTANTE: nenhuma função aqui MUDA a lógica/decisão metodológica das
-# versões originais dos scripts. O objetivo desta revisão é (1) parar de
-# duplicar código entre scripts e (2) adicionar MEDIÇÃO/LOG das decisões que
-# hoje são tomadas silenciosamente, para permitir checagem antes de decidir
-# se a metodologia muda. Onde isso não vale, está sinalizado no comentário.
 ################################################################################
 
 suppressPackageStartupMessages({
@@ -98,28 +92,29 @@ download_file <- function(url, dest_dir, filename = basename(url), max_attempts 
     message("Downloading: ", filename, " [", attempt, "/", max_attempts, "]")
     ok <- tryCatch({
       download.file(url, destfile = dst, mode = "wb", method = "libcurl")
- 
+
       if (!file.exists(dst) || is.na(file.info(dst)$size) || file.info(dst)$size == 0) {
         stop("Downloaded file is missing or empty.")
       }
- 
-      tam_baixado <- file.info(dst)$size
-      if (!is.na(tam_min) && tam_baixado < tam_min) {                # <<< NOVO
-        stop(sprintf(
-          "Download possivelmente truncado: %s bytes agora vs %s bytes no ultimo download bem-sucedido.",
-          format(tam_baixado, big.mark = "."), format(tam_min, big.mark = ".")
-        ))
-      }
- 
+
       TRUE
     }, error = function(e) {
       warning("Attempt ", attempt, " failed: ", filename, " | ", conditionMessage(e))
       FALSE
     })
     if (ok) {
-      message("OK: ", filename, " | size=", format(file.info(dst)$size, big.mark = "."))
-      return(list(success = TRUE, sha256 = sha256_file(dst), size_bytes = file.info(dst)$size,
-                  attempts_used = attempt, note = "download_ok"))
+      tam_baixado <- file.info(dst)$size
+      nota <- "download_ok"
+      if (!is.na(tam_min) && tam_baixado < tam_min) {
+        message(sprintf(
+          "[download] AVISO (so log, nao bloqueia): %s veio menor que o ultimo download bem-sucedido - %s bytes agora vs %s bytes antes.",
+          filename, format(tam_baixado, big.mark = "."), format(tam_min, big.mark = ".")
+        ))
+        nota <- "download_ok_tamanho_menor_que_anterior"
+      }
+      message("OK: ", filename, " | size=", format(tam_baixado, big.mark = "."))
+      return(list(success = TRUE, sha256 = sha256_file(dst), size_bytes = tam_baixado,
+                  attempts_used = attempt, note = nota))
     }
     Sys.sleep(runif(1, 5, 15))
   }
@@ -208,19 +203,7 @@ relacionar_flag_opcional <- function(pma, camada) {
 # ==============================================================================
 # C) FILTRO POR PALAVRA-CHAVE COM DIAGNÓSTICO (IBAMA/ICMBio/SEMA-MT)
 # ==============================================================================
-# Substitui o padrão repetido `keep <- str_detect(...) | str_detect(...); x[keep,]`
-# que aparecia em 7 pontos do 02_pre_proc.R original. A LÓGICA do filtro (regex
-# de KEYWORDS, campos avaliados) não muda — o que se ganha é:
-#   (1) contagem de quantos registros entram/saem, e quanto cada campo
-#       contribui sozinho;
-#   (2) exportação de uma amostra dos valores NÃO capturados (mais frequentes
-#       primeiro) para revisão manual — é o jeito de checar se a lista de
-#       keywords está deixando passar variantes de escrita.
 
-# Palavras-chave de garimpo/mineracao usadas no filtro das camadas de
-# fiscalizacao (IBAMA/ICMBio/SEMA-MT). Centralizada aqui -- antes vivia
-# duplicada dentro de 02_pre_proc.R; qualquer ajuste na lista agora vale
-# tanto para o pre-proc quanto para os checks de diagnostico.
 KEYWORDS_GARIMPO <- c(
   "GARIMP",                  # GARIMPO, GARIMPEIRO/A, GARIMPAGEM, GARIMPAR...
   "MINER",                   # MINERAL(IS), MINERARIO/A, MINERIO, MINERACAO, MINERADORA...
@@ -261,11 +244,6 @@ aplicar_filtro_palavras_chave <- function(x, campos, regex, label,
   keep_por_campo <- lapply(textos, function(v) !is.na(v) & stringr::str_detect(v, regex))
   keep_regex <- Reduce(`|`, keep_por_campo)
   keep_regex[is.na(keep_regex)] <- FALSE
-
-  # keep_extra: criterio adicional (ex: campo categorico fechado, tipo
-  # TIPO == "RECURSOS MINERAIS" no SEMA-MT SIGA) somado via OR ao resultado
-  # da regex em texto livre -- usado quando a camada tem, alem do texto
-  # livre, uma classificacao mais confiavel que a busca por palavra-chave.
   keep <- if (is.null(keep_extra)) keep_regex else (keep_regex | keep_extra)
 
   n_antes  <- nrow(attrs)

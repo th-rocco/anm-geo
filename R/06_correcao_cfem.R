@@ -1,11 +1,6 @@
 ################################################################################
 # 06_correcao_cfem.R
 #
-# Correcao de peso/preco das declaracoes de CFEM (OURO via mediana
-# hierarquica + fallback; CASSITERITA via metodo "white solder" contra
-# faixa absoluta), agregacao por processo x foco, e exports finais
-# (result_shiny / result_gee / result_db).
-#
 # Depende do checkpoint 05_cfem_bruto (preparo, sem nenhuma correcao ainda)
 # gerado pelo 05_integracao_final.R.
 ################################################################################
@@ -407,6 +402,106 @@ if (RODAR_CASSITERITA) {
 # OURO (30.000-1.000.000 R$/kg)
 cfem_final <- corrige_mineral_3checks(cfem_final, "OURO", subs_keep = "OURO", subs_col = "SUBSarrSIM",
                                       pmin_kg = 30 * 1000, pmax_kg = 1000 * 1000, min_med_plaus = 30, max_med_plaus = 1000)
+
+# ============================================================================
+# COLUMBITA (grupo NIOBIO) -- correcao white solder ampliada, faixa unica
+# =============================================================================
+# 99,4% do grupo NIOBIO nas fases de interesse (536 de 539 declaracoes);
+# MINERIO DE NIOBIO (n=3) fica de fora, amostra irrelevante -- ver
+# checks/verificacao_niobio.R.
+#
+# Faixa [20,200] R$/kg validada em checks/teste_correcao_niobio_faixas.R:
+# de 3 faixas candidatas testadas, foi a UNICA em que os 2 CNPJ do maior
+# declarante (Areia Preta Metais LTDA, matriz+filial, 59,6% do volume
+# 2019+) convergiram pro mesmo preco corrigido (R$85,53 vs R$84,55/kg --
+# as outras 2 faixas testadas davam resultados incoerentes entre os dois
+# CNPJ da MESMA empresa, alem de "empurrar" muitos valores pro limite da
+# faixa, sinal de faixa mal calibrada).
+#
+# Decisao 2026-08: corrige SO 2019+ (505 declaracoes). Antes de 2019 sao
+# so 31 declaracoes (21 delas de um unico ano, 2006) -- amostra pequena
+# demais pra rodar o mesmo teste de consistencia entre declarantes, entao
+# fica SEM correcao (corr = "original") ate termos evidencia melhor pra
+# validar uma faixa pro periodo antigo.
+# ============================================================================
+
+FASES_NIOBIO     <- FASES_CORR_PADRAO
+ANO_CORTE_NIOBIO <- 2019
+
+corrige_columbita_ws <- function(cfem_final, pmin_kg = 20, pmax_kg = 200) {
+  qa_path_checks <- file.path(QA_DIR, "cfem_correcao_checks.csv")
+  pmin_g <- pmin_kg / 1000; pmax_g <- pmax_kg / 1000
+
+  universo <- cfem_final |>
+    dplyr::filter(SUBSarr == "COLUMBITA", FASE %in% FASES_NIOBIO, ANO >= ANO_CORTE_NIOBIO)
+
+  if (nrow(universo) == 0) {
+    message("[COLUMBITA] subset vazio -- nada a fazer.")
+    return(cfem_final)
+  }
+
+  message("\n### COLUMBITA (", ANO_CORTE_NIOBIO, "+) | n = ", nrow(universo), " ###")
+  report_check(universo, "COLUMBITA", "CHECK 1 (antes)", pmin_kg, pmax_kg, qa_path_checks)
+
+  ws <- universo |>
+    dplyr::rowwise() |>
+    dplyr::mutate(
+      .r     = list(ws_fator_10(PESO_G, VALORtot, pmin_g, pmax_g,
+                                dplyr::if_else("QTD_MINERIO" %in% names(universo), QTD_MINERIO, NA_real_),
+                                fatores = fatores_simples_amplo)),
+      fator  = .r[["fator"]], motivo = .r[["motivo"]]
+    ) |>
+    dplyr::ungroup() |>
+    dplyr::mutate(
+      PESO_G_ws  = dplyr::if_else(!is.na(fator), PESO_G * fator, PESO_G),
+      PESO_KG_ws = PESO_G_ws / 1000,
+      preco_g_ws = dplyr::if_else(!is.na(PESO_G_ws) & PESO_G_ws > 0, VALORtot / PESO_G_ws, NA_real_),
+      corr_ws = dplyr::case_when(
+        motivo == 3                ~ "sem_quantidade_declarada",
+        motivo %in% c(0, 1)        ~ "dado_corrompido",
+        !is.na(fator) & fator == 1 ~ "original",
+        TRUE                       ~ paste0("pow10_p", round(log10(fator)))
+      )
+    ) |>
+    dplyr::select(row_id, PESO_G_ws, PESO_KG_ws, preco_g_ws, corr_ws)
+
+  cfem_final <- cfem_final |>
+    dplyr::left_join(ws, by = "row_id") |>
+    dplyr::mutate(
+      PESO_G_final  = dplyr::if_else(!is.na(PESO_G_ws),  PESO_G_ws,  PESO_G_final),
+      PESO_KG_final = dplyr::if_else(!is.na(PESO_KG_ws), PESO_KG_ws, PESO_KG_final),
+      preco_g_final = dplyr::if_else(!is.na(preco_g_ws), preco_g_ws, preco_g_final),
+      corr          = dplyr::if_else(!is.na(corr_ws),    corr_ws,    corr)
+    ) |>
+    dplyr::select(-PESO_G_ws, -PESO_KG_ws, -preco_g_ws, -corr_ws)
+
+  univ_pos <- cfem_final |>
+    dplyr::filter(SUBSarr == "COLUMBITA", FASE %in% FASES_NIOBIO, ANO >= ANO_CORTE_NIOBIO)
+  report_check(univ_pos, "COLUMBITA", "CHECK 2 (final)", pmin_kg, pmax_kg, qa_path_checks)
+
+  dist_corr <- univ_pos |> dplyr::count(corr, sort = TRUE)
+  message("[COLUMBITA] distribuicao final de 'corr':")
+  print(dist_corr)
+  readr::write_csv(dist_corr |> dplyr::mutate(mineral = "COLUMBITA", .before = 1),
+                   file.path(QA_DIR, "cfem_distribuicao_corr_columbita.csv"))
+
+  n_pre2019 <- cfem_final |>
+    dplyr::filter(SUBSarr == "COLUMBITA", FASE %in% FASES_NIOBIO, ANO < ANO_CORTE_NIOBIO) |>
+    nrow()
+  message(sprintf(
+    "[COLUMBITA] pre-%d (%d declaracoes) NAO corrigido -- amostra insuficiente pra validar faixa (ver checks/teste_correcao_niobio_faixas.R).",
+    ANO_CORTE_NIOBIO, n_pre2019
+  ))
+
+  cfem_final
+}
+
+RODAR_COLUMBITA <- TRUE
+if (RODAR_COLUMBITA) {
+  cfem_final <- corrige_columbita_ws(cfem_final)
+} else {
+  message("[06][columbita] RODAR_COLUMBITA = FALSE -- pulando correcao.")
+}
 
                                       
 # cfem_correcao_extrema -- sinaliza correcao de peso incerta/agressiva.
@@ -969,3 +1064,5 @@ readr::write_csv(cfem_final,    file.path(RESULT_DB, "cfem_amzl_ALLminerals_GOLD
 readr::write_csv(cfem_aut_amzl, file.path(RESULT_DB, "cfem_aut_all_min_amzl.csv"))
 
 message("\n=== 06_correcao_cfem.R — CONCLUÍDO ===")
+
+names(pma_db)
