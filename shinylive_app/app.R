@@ -1,3 +1,7 @@
+# === INSERIDO POR 10_export_shinylive.R -- nao editar aqui ===
+# bindCache desativado: sem backend de cache no webR.
+bindCache <- function(x, ...) x
+
 # app.R
 suppressPackageStartupMessages({
   library(shiny); library(dplyr); library(sf)
