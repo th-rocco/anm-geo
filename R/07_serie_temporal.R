@@ -27,6 +27,15 @@
 # situacao documental, propriedade do solo, protecao art 211/213, despacho
 # judicial em texto livre, penalidades) NAO estao aqui. Ver mensagem
 # separada com a lista completa do que fica de fora, pra decisao conjunta.
+#
+# Revisao 2026-08-25 (auditoria Sentinela da Amazonia):
+#   F-12  DIC_PATH apontava para data/_qa/classificacao_temporal_permissao/ --
+#         a pasta de SAIDA de QA do script de checagem homonimo. O gerador
+#         escreve em R/ e o check tambem le de R/: so este script apontava para
+#         outro lugar, entao regenerar o dicionario nao chegava ao pipeline.
+#         Corrigido para R/, e a ausencia do arquivo agora falha com instrucao.
+#   F-12  Evento sem match no dicionario passa a FALHAR, nao so a ser contado
+#         em QA. Sem 'papel', o evento atravessa a serie inteira sem rotulo.
 ################################################################################
 
 rm(list = ls(all.names = TRUE))
@@ -48,7 +57,15 @@ suppressPackageStartupMessages({
 source(here::here("R", "utils.R"))
 
 MICRO_DIR <- here::here("data", "result_db", "microdados")
-DIC_PATH  <- here::here("data", "_qa", "classificacao_temporal_permissao", "dicionario_eventos_classificado_v2.csv")
+
+# DIC_PATH corrigido em 2026-08-25 (auditoria F-12).
+# Apontava para data/_qa/classificacao_temporal_permissao/, que e a pasta de
+# SAIDA de QA do script de checagem homonimo. So que o gerador
+# (checks/gerar_dicionario_enriquecido.R) ESCREVE em R/, e o proprio
+# classificacao_temporal_permissao.R LE de R/. Ou seja: a cadeia toda usa R/ e
+# so este script apontava para outro lugar -- rodar o gerador nao chegava ao
+# pipeline, dependia de alguem copiar o arquivo a mao.
+DIC_PATH  <- here::here("R", "dicionario_eventos_classificado_v2.csv")
 QA_DIR    <- here::here("data", "_qa", "07_serie_temporal")
 SHINY_DIR <- here::here("shiny_dashboard")
 dir.create(QA_DIR, recursive = TRUE, showWarnings = FALSE)
@@ -60,6 +77,13 @@ FASES_DE_PESQUISA <- c("AUT PESQ")
 # =============================================================================
 # BLOCO 0 — CARREGA DICIONARIO V2 + EVENTOS, JUNTA
 # =============================================================================
+
+if (!file.exists(DIC_PATH)) {
+  stop("[07] dicionario nao encontrado em ", DIC_PATH,
+       "\n     Rodar checks/gerar_dicionario_enriquecido.R, que o gera a partir ",
+       "de R/dicionario_eventos_classificado.csv (base, 2.920 eventos).",
+       call. = FALSE)
+}
 
 dic <- readr::read_csv(DIC_PATH, show_col_types = FALSE) |>
   dplyr::mutate(idevento = as.character(idevento))
@@ -81,11 +105,31 @@ n_sem_data  <- sum(is.na(eventos$dtevento))
 n_sem_match <- sum(is.na(eventos$papel))
 message(sprintf("[07][0] eventos totais: %d | sem dtevento (excluidos): %d | sem match no dicionario: %d (%.2f%%)",
                 nrow(eventos), n_sem_data, n_sem_match, 100 * n_sem_match / nrow(eventos)))
+
+# FALHA, nao so registra (2026-08-25, auditoria F-12).
+# Antes isto contava, gravava um CSV em QA e seguia. Evento sem 'papel' entra
+# na maquina de estados SEM rotulo e atravessa a serie temporal inteira em
+# silencio -- e a serie e a resposta para "esse garimpo podia operar nesta
+# data?". Se a ANM criar um idevento novo, queremos saber ANTES de publicar,
+# nao depois.
+#
+# O caminho para resolver e sempre o mesmo: rodar o gerador com o dicionario
+# base atualizado. NAO reconstruir a classificacao a partir da saida do
+# pipeline -- seria circular, e nao cobriria justamente o evento novo.
 if (n_sem_match > 0) {
-  readr::write_csv(
-    eventos |> dplyr::filter(is.na(papel)) |> dplyr::count(idevento, sort = TRUE),
+  faltantes <- eventos |>
+    dplyr::filter(is.na(papel)) |>
+    dplyr::count(idevento, sort = TRUE)
+  readr::write_csv(faltantes, file.path(QA_DIR, "00_ideventos_sem_match.csv"))
+
+  stop(sprintf(
+    paste0("[07] %d evento(s) sem classificacao no dicionario (%d idevento(s) ",
+           "distinto(s), %.2f%% da base).\n     Lista em: %s\n",
+           "     Acrescentar ao dicionario base e rodar ",
+           "checks/gerar_dicionario_enriquecido.R."),
+    n_sem_match, nrow(faltantes), 100 * n_sem_match / nrow(eventos),
     file.path(QA_DIR, "00_ideventos_sem_match.csv")
-  )
+  ), call. = FALSE)
 }
 
 eventos <- eventos |> dplyr::filter(!is.na(dtevento)) |> dplyr::arrange(processo, dtevento)

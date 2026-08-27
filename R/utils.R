@@ -5,11 +5,20 @@
 # Cada script deve dar source() aqui, depois de carregar seus pacotes.
 #
 # Seções:
-#   A) Download / manifest (etapa 01)
+#   A) Download / manifest (etapa 01) — inclui User-Agent do projeto
 #   B) Utilitários genéricos de ETL (etapa 02): safe_step, safe_unzip,
-#      to_upper_utf8, first_match, clean_geometry (com contagem de descarte)
+#      to_upper_utf8, first_match, ler_vetor (inventário de geometrias +
+#      fontes obrigatórias), clean_geometry (com contagem de descarte)
 #   C) Filtro por palavra-chave com diagnóstico (etapa 02 — IBAMA/ICMBio/SEMA)
 #   D) Parsing "inteligente" de CFEM com diagnóstico (delimitador/decimal)
+#
+# Revisão 2026-08 (auditoria Sentinela da Amazônia), 4 mudanças:
+#   F-04  UA_PROJETO + options(HTTPUserAgent) — o default do R levava 403 da
+#         FUNAI; atalho de skip do tis_poligonais.zip removido.
+#   F-07  padroniza_doc: ordem do case_when corrigida e ramo de padding para 14
+#         removido; mascarar_doc_pessoa_fisica() para uso na ingestão.
+#   F-01  ler_vetor(): compara registros no arquivo vs feições lidas e falha
+#         quando a fonte é obrigatória. FONTES_OBRIGATORIAS declarada.
 ################################################################################
 
 suppressPackageStartupMessages({
@@ -22,11 +31,55 @@ suppressPackageStartupMessages({
   library(tibble)
 })
 
+# Usados via :: (nao anexados): curl (testar_user_agent), terra (ler_vetor,
+# clean_geometry, relacionar_flag_opcional), purrr, sf.
+
 # ==============================================================================
 # A) DOWNLOAD / MANIFEST (etapa 01)
 # ==============================================================================
 
 MANIFEST_DIR <- here::here("data", "_manifest")
+
+# ------------------------------------------------------------------------------
+# User-Agent (decisao 2026-08, auditoria F-04)
+# ------------------------------------------------------------------------------
+# O default do R ("R (versao ...)") e recusado com 403 pelo geoserver da FUNAI.
+# Nao e bloqueio a robos em geral -- e rejeicao do identificador da biblioteca.
+# Optamos por nos identificar honestamente (projeto + contato) em vez de forjar
+# navegador. Se algum servidor recusar ESTE UA, usar UA_FALLBACK e registrar
+# AQUI qual fonte exigiu e em que data.
+#
+# VERIFICADO 2026-08-25: UA_PROJETO aceito por TODAS as fontes, inclusive a
+# FUNAI (tis_poligonais.zip baixou 22,3 MB). UA_FALLBACK nao foi necessario e
+# permanece so como contingencia.
+#
+# Fontes que exigiram UA_FALLBACK ate hoje: (nenhuma)
+UA_PROJETO  <- "anm-geo/1.0 (pesquisa academica; contato: <preencher>)"
+UA_FALLBACK <- paste("Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                     "AppleWebKit/537.36 (KHTML, like Gecko)",
+                     "Chrome/124.0.0.0 Safari/537.36")
+
+options(HTTPUserAgent = UA_PROJETO)
+
+# Diagnostico: testa um UA contra uma URL sem baixar o corpo inteiro.
+#
+# CORRIGIDO 2026-08-25: a primeira versao usava HEAD (nobody = TRUE) e deu 4
+# falsos positivos numa rodada de 37 URLs -- ICMBio (2x), IBAMA autos e o PDF
+# do MER responderam 403/NA ao HEAD e baixaram normalmente logo depois. Varios
+# servidores recusam HEAD e aceitam GET. Passa a pedir so o primeiro byte via
+# Range, que e igualmente barato e usa o mesmo metodo do download real.
+#
+# Servidor que ignora Range devolve 200 e o corpo todo; por isso o timeout
+# curto e o descarte da resposta.
+testar_user_agent <- function(url, ua = getOption("HTTPUserAgent"), timeout_s = 20) {
+  h <- curl::new_handle()
+  curl::handle_setopt(h, useragent = ua, followlocation = TRUE,
+                      range = "0-0", timeout = timeout_s)
+  res <- tryCatch(curl::curl_fetch_memory(url, handle = h), error = function(e) NULL)
+  status <- if (is.null(res)) NA_integer_ else res$status_code
+  message(sprintf("[UA] status %s | %s", status, substr(basename(url), 1, 45)))
+  invisible(status)
+}
 
 sha256_file <- function(path) {
   if (!file.exists(path)) return(NA_character_)
@@ -73,13 +126,13 @@ download_file <- function(url, dest_dir, filename = basename(url), max_attempts 
   dir.create(dest_dir, recursive = TRUE, showWarnings = FALSE)
   dst <- file.path(dest_dir, filename)
  
-  if (filename == "tis_poligonais.zip" && file.exists(dst) && file.info(dst)$size > 1000) {
-    message("FUNAI file already exists. Skipping.")
-    return(list(success = TRUE, sha256 = sha256_file(dst), size_bytes = file.info(dst)$size,
-                attempts_used = 0L, note = "skip_existente_funai"))
-  }
- 
-  tam_min <- tamanho_anterior(dest_dir, filename)  # <<< NOVO
+  # NOTA (2026-08, auditoria F-04): havia aqui um atalho que pulava o download
+  # do tis_poligonais.zip quando o arquivo ja existia -- contorno para o 403 da
+  # FUNAI. Com o UA corrigido o atalho se inverte: passaria a reportar sucesso
+  # para um arquivo colocado a mao que nunca mais atualiza, sem passar pela
+  # checagem de tamanho contra o manifest. Removido. Nenhuma fonte tem excecao.
+
+  tam_min <- tamanho_anterior(dest_dir, filename)
   if (is.na(tam_min)) {
     message("[download] sem manifest anterior para ", filename,
             " — completude checada so por size>0 (1o download deste arquivo).")
@@ -108,11 +161,11 @@ download_file <- function(url, dest_dir, filename = basename(url), max_attempts 
       if (!is.na(tam_min) && tam_baixado < tam_min) {
         message(sprintf(
           "[download] AVISO (so log, nao bloqueia): %s veio menor que o ultimo download bem-sucedido - %s bytes agora vs %s bytes antes.",
-          filename, format(tam_baixado, big.mark = "."), format(tam_min, big.mark = ".")
+          filename, fmt_int(tam_baixado), fmt_int(tam_min)
         ))
         nota <- "download_ok_tamanho_menor_que_anterior"
       }
-      message("OK: ", filename, " | size=", format(tam_baixado, big.mark = "."))
+      message("OK: ", filename, " | size=", fmt_int(tam_baixado))
       return(list(success = TRUE, sha256 = sha256_file(dst), size_bytes = tam_baixado,
                   attempts_used = attempt, note = nota))
     }
@@ -138,8 +191,16 @@ download_named_urls <- function(named_urls, dest_dir, target_name, max_attempts 
 
 safe_step <- function(label, expr) {
   message("\n--- ", label, " ---")
+  # CORRIGIDO 2026-08-25: antes fazia force(expr), o que avalia a expressao no
+  # ambiente do chamador. Qualquer return() no corpo do passo (padrao usado em
+  # varios blocos do 02 para "pular" fonte ausente) estourava com
+  # "no function to return from, jumping to top level" e o passo era marcado
+  # como FAILED por um erro que nao tinha nada a ver com o dado.
+  # Passa a montar uma funcao anonima com o corpo do passo, entao return()
+  # funciona como qualquer um espera ao ler o codigo.
+  corpo <- as.function(c(alist(), substitute(expr)), envir = parent.frame())
   status <- tryCatch({
-    force(expr)
+    corpo()
     list(success = TRUE, error_msg = NA)
   }, error = function(e) {
     msg <- conditionMessage(e)
@@ -151,9 +212,29 @@ safe_step <- function(label, expr) {
 }
 
 safe_unzip <- function(zip_path, exdir) {
-  if (!file.exists(zip_path)) return(FALSE)
+  # 2026-08-25: antes engolia a causa (tryCatch -> FALSE mudo), o que custou
+  # tempo ao diagnosticar o zip dos microdados. Agora reporta o motivo e
+  # tambem o aviso do unzip(), que sinaliza truncamento e zip64.
+  if (!file.exists(zip_path)) {
+    message("[safe_unzip] arquivo nao existe: ", zip_path)
+    return(FALSE)
+  }
   dir.create(exdir, recursive = TRUE, showWarnings = FALSE)
-  tryCatch({ unzip(zip_path, exdir = exdir); TRUE }, error = function(e) FALSE)
+  tryCatch(
+    withCallingHandlers(
+      { unzip(zip_path, exdir = exdir); TRUE },
+      warning = function(w) {
+        message("[safe_unzip] aviso em ", basename(zip_path), ": ",
+                conditionMessage(w))
+        invokeRestart("muffleWarning")
+      }
+    ),
+    error = function(e) {
+      message("[safe_unzip] FALHOU em ", basename(zip_path), ": ",
+              conditionMessage(e))
+      FALSE
+    }
+  )
 }
 
 to_upper_utf8 <- function(x, from = "") {
@@ -171,6 +252,7 @@ clean_geometry <- function(v, label = NULL) {
   n0 <- length(v)
   v <- terra::makeValid(v)
   n1 <- length(v)
+  n_makevalid <- n0 - n1          # <<< 2026-08: perda no makeValid, antes invisivel
   area_ok <- terra::expanse(v) > 0
   n_zero_area <- sum(!area_ok)
   v <- v[area_ok, ]
@@ -178,27 +260,150 @@ clean_geometry <- function(v, label = NULL) {
   v <- terra::project(v, "EPSG:4326")
 
   if (!is.null(label)) {
+    # A mensagem anterior so reportava "descartadas (area==0)", o que escondia a
+    # perda do makeValid. Ex. IBAMA embargos: 90.984 -> 77.157, com area==0 = 0.
     message(sprintf(
-      "[%s] clean_geometry | inicial: %d | pos-makeValid: %d | descartadas (area==0): %d | final: %d",
-      label, n0, n1, n_zero_area, n2
+      "[%s] clean_geometry | inicial: %d | pos-makeValid: %d (perdidas: %d) | area==0: %d | final: %d",
+      label, n0, n1, n_makevalid, n_zero_area, n2
     ))
+    if (n_makevalid > 0) {
+      message(sprintf(
+        "[%s] ATENCAO: %d feicao(oes) (%.1f%%) descartada(s) por makeValid -- geometria irreparavel.",
+        label, n_makevalid, 100 * n_makevalid / n0
+      ))
+    }
   }
   v
 }
 
-carregar_shp_opcional <- function(path, label = basename(path)) {
-  if (!file.exists(path)) {
-    warning("[fonte indisponivel] ", label, " nao encontrado em ", path,
-            " (flag correspondente fica NA, nao 0).")
-    return(NULL)
+# ------------------------------------------------------------------------------
+# LEITURA VETORIAL COM INVENTARIO (decisao 2026-08, auditoria F-01)
+# ------------------------------------------------------------------------------
+# O pipeline foi desenhado de proposito para TOLERAR fonte ausente:
+# carregar_shp_opcional() devolve NULL, relacionar_flag_opcional() grava NA (nao
+# 0) e o 05 escreve um CSV de disponibilidade. Isso e bom desenho e fica.
+#
+# O que faltava era distinguir OPCIONAL de OBRIGATORIA, e detectar a camada que
+# chega vazia sem erro. Foi assim que o shapefile de autos de infracao do ICMBio
+# passou anos sem contribuir: terra::vect() escolhe UM tipo de geometria e
+# descarta o resto por message (nao por erro), o passo reportou sucesso, e o
+# filtro de palavra-chave zerou o que sobrou.
+#
+# ler_vetor() compara o numero de REGISTROS na tabela de atributos com o numero
+# de FEICOES efetivamente lidas. A diferenca e exatamente o que foi descartado
+# em silencio.
+
+# Fontes sem as quais a etapa correspondente NAO tem sentido rodar.
+# Chave = rotulo passado em ler_vetor(label = ...).
+FONTES_OBRIGATORIAS <- c(
+  "PMA",            # 03 -- poligonos dos processos minerarios (ANM)
+  "AMZ_LEGAL",      # 03 -- recorte da Amazonia Legal
+  "TI",             # 03 -- terras indigenas (FUNAI)
+  "UC",             # 03 -- unidades de conservacao (MMA/CNUC)
+  "QUILOMBOLA"      # 03 -- territorios quilombolas (INCRA)
+)
+
+# Formata inteiro com separador de milhar sem disparar o aviso do prettyNum
+# ('big.mark' and 'decimal.mark' are both '.'), que poluia o log a cada chamada.
+fmt_int <- function(x) formatC(x, format = "d", big.mark = ".", decimal.mark = ",")
+
+# Le um vetor e reporta a composicao de geometrias ANTES de qualquer limpeza.
+#   obrigatoria = NULL  -> decide por FONTES_OBRIGATORIAS
+#   obrigatoria = TRUE  -> ausencia, leitura vazia ou descarte silencioso = erro
+#   obrigatoria = FALSE -> devolve NULL/segue, mantendo o contrato atual (flag NA)
+ler_vetor <- function(path, label = basename(path), obrigatoria = NULL,
+                      max_perda_pct = 0) {
+
+  if (is.null(obrigatoria)) obrigatoria <- label %in% FONTES_OBRIGATORIAS
+
+  parar_ou_avisar <- function(msg) {
+    if (obrigatoria) stop("[fonte OBRIGATORIA] ", label, ": ", msg, call. = FALSE)
+    warning("[fonte opcional] ", label, ": ", msg,
+            " (flag correspondente fica NA, nao 0).", call. = FALSE)
+    NULL
   }
-  terra::vect(path)
+
+  if (is.na(path) || !file.exists(path)) {
+    return(parar_ou_avisar(paste0("arquivo nao encontrado em ", path)))
+  }
+
+  # 1) Quantos REGISTROS existem na tabela de atributos (nao passa pela
+  #    resolucao de tipo de geometria -- e a contagem verdadeira do arquivo).
+  n_registros <- tryCatch(
+    nrow(terra::vect(path, what = "attributes")),
+    error = function(e) NA_integer_
+  )
+
+  # 2) Quantas FEICOES o terra devolve, capturando o aviso de descarte.
+  avisos <- character(0)
+  v <- withCallingHandlers(
+    tryCatch(terra::vect(path), error = function(e) NULL),
+    message = function(m) {
+      avisos <<- c(avisos, trimws(conditionMessage(m)))
+      invokeRestart("muffleMessage")
+    },
+    warning = function(w) {
+      avisos <<- c(avisos, trimws(conditionMessage(w)))
+      invokeRestart("muffleWarning")
+    }
+  )
+
+  if (is.null(v)) return(parar_ou_avisar("terra::vect() falhou na leitura"))
+
+  n_feicoes <- length(v)
+  tipos <- tryCatch(as.character(terra::geomtype(v)), error = function(e) NA_character_)
+
+  perdidos  <- if (is.na(n_registros)) NA_integer_ else n_registros - n_feicoes
+  perda_pct <- if (is.na(perdidos) || n_registros == 0) NA_real_ else 100 * perdidos / n_registros
+
+  message(sprintf(
+    "[%s] ler_vetor | registros no arquivo: %s | feicoes lidas: %s | tipo: %s%s",
+    label,
+    ifelse(is.na(n_registros), "?", fmt_int(n_registros)),
+    fmt_int(n_feicoes),
+    tipos,
+    if (!is.na(perdidos) && perdidos > 0)
+      sprintf(" | DESCARTADAS EM SILENCIO: %s (%.1f%%)",
+              fmt_int(perdidos), perda_pct) else ""
+  ))
+  for (a in avisos) message("[", label, "] aviso do terra: ", a)
+
+  if (n_feicoes == 0) {
+    return(parar_ou_avisar("leitura devolveu 0 feicoes -- camada vazia"))
+  }
+  if (!is.na(perda_pct) && perda_pct > max_perda_pct) {
+    msg <- sprintf(paste0("%s de %s registro(s) descartado(s) na leitura (%.1f%%). ",
+                          "Geometria mista? Conferir antes de seguir."),
+                   fmt_int(perdidos), fmt_int(n_registros), perda_pct)
+    r <- parar_ou_avisar(msg)
+    if (obrigatoria) return(r)
+  }
+
+  v
+}
+
+# Mantida por compatibilidade com o 05. Delega para ler_vetor() como opcional,
+# preservando o contrato de devolver NULL e deixar a flag em NA.
+carregar_shp_opcional <- function(path, label = basename(path)) {
+  ler_vetor(path, label = label, obrigatoria = FALSE)
 }
 
 relacionar_flag_opcional <- function(pma, camada) {
   if (is.null(camada)) return(rep(NA_integer_, nrow(pma)))
   as.integer(terra::is.related(pma, camada, "intersects"))
 }
+
+# Flags de sobreposicao/proximidade/embargo produzidas no 05.
+# FONTE UNICA (2026-08-25, auditoria F-02): antes o vetor existia so no bloco de
+# QA do 05, e a lista de colunas propagadas para a tabela de CFEM era escrita a
+# mao -- e ficou desatualizada, levando 8 colunas e nenhuma flag. Incluir uma
+# fonte nova agora e acrescentar UMA entrada aqui.
+FLAGS_SOBREPOSICAO <- c(
+  "TIov", "UCov", "QUIov",              # sobreposicao real (>= 5% da area)
+  "TIov10km", "UCov2km", "QUIov10km",   # proximidade (donut) -- alerta, nao sobreposicao
+  "inf_MT", "inf_IC",                   # autos de infracao (SEMA-MT, ICMBio)
+  "emb_MTa", "emb_MTb", "emb_IB", "emb_IC"  # embargos (SEMA-MT x2, IBAMA, ICMBio)
+)
 
 # ==============================================================================
 # C) FILTRO POR PALAVRA-CHAVE COM DIAGNÓSTICO (IBAMA/ICMBio/SEMA-MT)
@@ -459,28 +664,72 @@ load_ckpt <- function(nome, ckpt_dir = CKPT_DIR_PADRAO) {
 limpar_dsprocesso <- function(x) stringr::str_replace_all(as.character(x), "\\.", "")
 
 # Padroniza CPF/CNPJ (com ou sem mascara) para um formato unico de exibicao.
-#   CNPJ  -> 11.111.111/1111-11
-#   CPF mascarado -> ***.111.111-**
-#   vazio ("-", "", NA) -> NA
-padroniza_doc <- function(x) {
+#   CNPJ (14 digitos)      -> 11.111.111/1111-11
+#   CPF  (11 digitos)      -> 111.111.111-11
+#   CPF mascarado ANM (6)  -> ***.111.111-**
+#   vazio ("-", "", NA)    -> NA
+#
+# DECISOES 2026-08 (auditoria F-07):
+#  (a) O ramo de 11 digitos vinha DEPOIS do ramo generico "nd > 6 & nd < 14" e
+#      era codigo inalcancavel: todo CPF virava CNPJ com zeros a esquerda.
+#      Ordem corrigida -- os ramos agora sao por comprimento exato.
+#  (b) O ramo generico foi REMOVIDO, nao reordenado. Ele completava qualquer
+#      documento de 7 a 13 digitos para 14, o que fabrica CNPJ inexistente a
+#      partir de CPF que perdeu zero a esquerda em conversao numerica. Num
+#      produto investigativo, inventar documento pode ligar duas entidades sem
+#      relacao. Comprimento fora do esperado agora vira NA e e contado no log.
+#      Volume observado nos arquivos do ICMBio: ~1.400 registros de 7 a 13
+#      digitos, contra ~43.000 CPFs de 11 digitos.
+#
+# NAO mascara documento cru -- isso e responsabilidade da INGESTAO (etapa 02),
+# antes de qualquer persistencia. Esta funcao e apenas formatadora.
+padroniza_doc <- function(x, label = NULL) {
   x  <- trimws(as.character(x))
   d  <- gsub("\\D", "", x)
   nd <- nchar(d)
-  dplyr::case_when(
+
+  out <- dplyr::case_when(
     is.na(x) | x %in% c("", "-") ~ NA_character_,
     grepl("\\*", x) & nd == 6 ~ sprintf("***.%s.%s-**", substr(d, 1, 3), substr(d, 4, 6)),
+    nd == 11 ~ sprintf("%s.%s.%s-%s",
+                       substr(d, 1, 3), substr(d, 4, 6), substr(d, 7, 9), substr(d, 10, 11)),
     nd == 14 ~ sprintf("%s.%s.%s/%s-%s",
                        substr(d, 1, 2), substr(d, 3, 5), substr(d, 6, 8),
                        substr(d, 9, 12), substr(d, 13, 14)),
-    nd > 6 & nd < 14 ~ {
-      d14 <- stringr::str_pad(d, 14, "left", "0")
-      sprintf("%s.%s.%s/%s-%s",
-              substr(d14, 1, 2), substr(d14, 3, 5), substr(d14, 6, 8),
-              substr(d14, 9, 12), substr(d14, 13, 14))
-    },
-    nd == 11 ~ sprintf("%s.%s.%s-%s",
-                       substr(d, 1, 3), substr(d, 4, 6), substr(d, 7, 9), substr(d, 10, 11)),
     TRUE ~ NA_character_
+  )
+
+  descartados <- is.na(out) & !is.na(x) & !(x %in% c("", "-")) & nd > 0
+  if (any(descartados)) {
+    tab <- table(nd[descartados])
+    message(sprintf(
+      "[padroniza_doc%s] %d documento(s) com comprimento inesperado -> NA | por n de digitos: %s",
+      if (is.null(label)) "" else paste0(" | ", label),
+      sum(descartados),
+      paste(sprintf("%s dig=%d", names(tab), as.integer(tab)), collapse = ", ")
+    ))
+  }
+  out
+}
+
+# Mascara documento na INGESTAO (decisao 2026-08, auditoria F-07).
+# Os shapefiles do ICMBio trazem CPF de 11 digitos sem mascara -- ~33k em autos
+# de infracao e ~10k em embargos. A ANM ja entrega pessoa fisica mascarada; as
+# fontes ambientais nao. Como a incorporacao do ICMBio (F-01) foi decidida por
+# sobreposicao ESPACIAL, o documento nao e usado como chave de cruzamento, e
+# portanto nao ha razao para persistir o valor cru.
+#
+# CPF -> mesmo formato mascarado da ANM (***.111.111-**), preservando os 6
+# digitos centrais, que e o que a propria ANM publica. CNPJ (pessoa juridica)
+# passa intacto: nao e dado pessoal.
+mascarar_doc_pessoa_fisica <- function(x) {
+  x  <- trimws(as.character(x))
+  d  <- gsub("\\D", "", x)
+  nd <- nchar(d)
+  dplyr::if_else(
+    nd == 11 & !grepl("\\*", x),
+    sprintf("***.%s.%s-**", substr(d, 4, 6), substr(d, 7, 9)),
+    x
   )
 }
 

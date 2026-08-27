@@ -13,6 +13,17 @@
 # 07_serie_temporal.R (Bloco E), que ja produz o cruzamento CFEM x aptidao
 # direto. Os dois pedacos deste arquivo sao independentes entre si e
 # independentes do 07 -- podem rodar em qualquer ordem em relacao a ele.
+#
+# Revisao 2026-08-25 (auditoria Sentinela da Amazonia):
+#   F-13  O checador de .rds estava colado no fim deste arquivo, com o caminho
+#         "C:/GP/anm-geo/shiny_dashboard" gravado no codigo -- em outra maquina
+#         o script morria DEPOIS de ja ter salvo tudo, gerando alarme falso a
+#         cada execucao. Virou etapa propria: R/09_checar_rds.R, com o
+#         diretorio resolvido por here::here() e codigo de saida 1 em caso de
+#         problema, para poder entrar em automacao.
+#   F-05  Copia fontes_disponibilidade.csv de data/result_shiny/ (onde o 05
+#         grava) para shiny_dashboard/ (onde o app le). Sem isso o diagnostico
+#         de fonte indisponivel nunca chegava a tela.
 ################################################################################
 
 rm(list = ls(all.names = TRUE))
@@ -394,111 +405,31 @@ simplify_and_save(uc,  file.path(OUTPUT_DIR, "uc_simpl.rds"),  0.3)
 simplify_and_save(qui, file.path(OUTPUT_DIR, "qui_simpl.rds"), 0.3)
 simplify_and_save(pma, file.path(OUTPUT_DIR, "pma_simpl.rds"), 0.1)
 
-message("\n=== 08_proc_shiny.R — CONCLUIDO ===")
-
-
-################################################################################
-# checar_rds_antes_deploy.R
-#
-# Checagem robusta de TODOS os .rds em shiny_dashboard antes do scp pro
-# droplet. Roda 100% local, so leitura -- nao altera nenhum arquivo.
-#
-# O que detecta:
-#   1) Erro de leitura (arquivo corrompido/ausente)
-#   2) Warnings emitidos durante o readRDS() -- pega qualquer warning, incluindo
-#      o "cannot unserialize ALTVEC object... returning length zero vector"
-#      (bug do arrow ALTREP ja identificado), sem depender do texto exato da
-#      mensagem continuar igual em versoes futuras do pacote.
-#   3) Checagem ESTRUTURAL independente do warning: compara o tamanho de CADA
-#      coluna com nrow(df). Isso pega o bug mesmo se o R um dia parar de
-#      emitir warning nesse caso -- e o teste que realmente importa, o warning
-#      e so um sintoma.
-#   4) Tabelas com 0 linhas (pode ser esperado ou sintoma de outro problema
-#      upstream -- sinalizado, nao tratado como erro automatico).
-################################################################################
-
-pasta <- "C:/GP/anm-geo/shiny_dashboard"   # <-- ajuste aqui se necessario
-
-arquivos_rds <- list.files(pasta, pattern = "\\.rds$", full.names = TRUE)
-
-if (length(arquivos_rds) == 0) {
-  stop("Nenhum .rds encontrado em: ", pasta)
-}
-
-checar_rds <- function(caminho) {
-  nome <- basename(caminho)
-  warnings_capturados <- character(0)
-
-  obj <- withCallingHandlers(
-    tryCatch(readRDS(caminho), error = function(e) e),
-    warning = function(w) {
-      warnings_capturados <<- c(warnings_capturados, conditionMessage(w))
-      invokeRestart("muffleWarning")
-    }
-  )
-
-  if (inherits(obj, "error")) {
-    return(data.frame(arquivo = nome, status = "ERRO_LEITURA",
-                       detalhe = conditionMessage(obj), stringsAsFactors = FALSE))
+# =============================================================================
+# DIAGNOSTICO DE FONTES -> PASTA DO DASHBOARD (auditoria F-05)
+# =============================================================================
+# O 05 grava fontes_disponibilidade.csv em data/result_shiny/ (intermediaria).
+# O app le de shiny_dashboard/ (final). Sem esta copia o arquivo nunca chega a
+# tela -- e a correcao do F-05 ficaria pela metade, que e exatamente o problema
+# que ela deveria resolver: diagnostico que existe e ninguem ve.
+fontes_src <- file.path(RESULT_SHINY, "fontes_disponibilidade.csv")
+if (file.exists(fontes_src)) {
+  file.copy(fontes_src, file.path(OUTPUT_DIR, "fontes_disponibilidade.csv"),
+            overwrite = TRUE)
+  fontes <- readr::read_csv(fontes_src, show_col_types = FALSE)
+  indisp <- fontes$fonte[!fontes$disponivel]
+  if (length(indisp) > 0) {
+    message("[08] ATENCAO -- fonte(s) indisponivel(is) na ultima execucao do 05: ",
+            paste(indisp, collapse = ", "),
+            " | flag(s) correspondente(s) estao NA (nao 0) nos dados publicados.")
+  } else {
+    message("[08] todas as fontes de embargo/infracao estavam disponiveis.")
   }
-
-  detalhe <- character(0)
-
-  if (length(warnings_capturados) > 0) {
-    detalhe <- c(detalhe, paste0("WARNING NA LEITURA: ", paste(unique(warnings_capturados), collapse = " || ")))
-  }
-
-  if (is.data.frame(obj)) {
-    n <- nrow(obj)
-    tam_colunas <- vapply(obj, length, integer(1))
-
-    colunas_zeradas      <- names(obj)[tam_colunas == 0 & n > 0]
-    colunas_incompativeis <- setdiff(names(obj)[tam_colunas != n], colunas_zeradas)
-
-    if (length(colunas_zeradas) > 0) {
-      detalhe <- c(detalhe, paste0("COLUNA(S) DE TAMANHO 0 (nrow=", n, "): ",
-                                    paste(colunas_zeradas, collapse = ", ")))
-    }
-    if (length(colunas_incompativeis) > 0) {
-      detalhe <- c(detalhe, paste0("COLUNA(S) COM TAMANHO != nrow: ",
-                                    paste(colunas_incompativeis, collapse = ", ")))
-    }
-    if (n == 0) {
-      detalhe <- c(detalhe, "AVISO: 0 linhas (confirmar se e esperado)")
-    }
-
-    if (inherits(obj, "sf")) {
-      tipos <- as.character(sf::st_geometry_type(obj))
-      tipos_ok <- c("POLYGON", "MULTIPOLYGON")
-      tipos_ruins <- setdiff(unique(tipos), tipos_ok)
-      if (length(tipos_ruins) > 0) {
-        n_ruins <- sum(tipos %in% tipos_ruins)
-        detalhe <- c(detalhe, paste0("GEOMETRIA INCOMPATIVEL COM leaflet::addPolygons -- ",
-                                      n_ruins, " linha(s) do tipo ",
-                                      paste(tipos_ruins, collapse = ", ")))
-      }
-    }
-  } else if (is.list(obj) && length(obj) == 0) {
-    detalhe <- c(detalhe, "LISTA VAZIA")
-  }
-
-  status <- if (length(detalhe) == 0) "OK" else "PROBLEMA"
-  data.frame(arquivo = nome, status = status,
-             detalhe = paste(detalhe, collapse = " | "), stringsAsFactors = FALSE)
-}
-
-resultado <- do.call(rbind, lapply(arquivos_rds, checar_rds))
-
-cat("\n================ RESUMO (", nrow(resultado), "arquivos ) ================\n")
-print(resultado[, c("arquivo", "status")], row.names = FALSE)
-
-problemas <- resultado[resultado$status != "OK", ]
-if (nrow(problemas) > 0) {
-  cat("\n================ DETALHES DOS PROBLEMAS ================\n")
-  for (i in seq_len(nrow(problemas))) {
-    cat("\n->", problemas$arquivo[i], "\n   ", problemas$detalhe[i], "\n")
-  }
-  cat("\n", nrow(problemas), "de", nrow(resultado), "arquivo(s) com problema -- NAO subir pro droplet ainda.\n")
 } else {
-  cat("\nTodos os", nrow(resultado), "arquivos passaram limpo. Pode subir pro droplet.\n")
+  warning("[08] fontes_disponibilidade.csv nao encontrado em ", RESULT_SHINY,
+          " -- rodar 05_integracao_final.R. O dashboard ficara sem o painel ",
+          "de disponibilidade de fontes.", call. = FALSE)
 }
+
+message("\n=== 08_proc_shiny.R — CONCLUIDO ===")
+message("Proximo passo: R/09_checar_rds.R (checagem dos .rds antes do deploy).")

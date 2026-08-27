@@ -3,6 +3,20 @@
 #
 # Depende do checkpoint 05_cfem_bruto (preparo, sem nenhuma correcao ainda)
 # gerado pelo 05_integracao_final.R.
+#
+# Revisão 2026-08-25 (auditoria Sentinela da Amazônia):
+#   F-17  Cabeçalho do bloco de cassiterita afirmava "MESMA faixa [30,300]"
+#         para os dois subsets; o código usa [30,300] para 2018+ e [5,50] para
+#         ≤2017. Texto alinhado ao comportamento real.
+#   F-14  Checagem de Biomas_250mil na entrada — é a terceira base do IBGE
+#         exigida sem download, e era usada só no fim do script, derrubando a
+#         execução depois de toda a correção de peso já ter rodado.
+#
+# FAIXAS REAIS, para conferência rápida:
+#   Cassiterita 2018+  [    30 –     300] R$/kg
+#   Cassiterita ≤2017  [     5 –      50] R$/kg   <- SEM respaldo empírico
+#   Ouro               [30.000 – 1.000.000] R$/kg
+#   Columbita          [    20 –     200] R$/kg
 ################################################################################
 
 rm(list = ls(all.names = TRUE))
@@ -39,6 +53,26 @@ RESULT_DB    <- here::here("data", "result_db")
 BIOMA_DIR <- here::here("data", "raw_data", "Biomas_250mil")
 
 for (d in c(RESULT_SHINY, RESULT_GEE, RESULT_DB, QA_DIR, QA_DIR_CORR)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
+
+# =============================================================================
+# CHECAGEM DE INSUMOS (auditoria F-14)
+# =============================================================================
+# Biomas_250mil e a TERCEIRA base territorial do IBGE exigida pelo pipeline sem
+# constar de nenhum download -- as outras duas sao Limites_Amazonia_Legal_2024
+# (03) e BR_Municipios_2025 (05). A auditoria falava em tres e eu so havia
+# localizado duas na primeira varredura; esta estava aqui, no recorte por bioma
+# para o GEE, a ~1.000 linhas do topo do script.
+#
+# E usada so no FINAL do 06, entao a ausencia derrubava o script depois de toda
+# a correcao de peso ja ter rodado -- meia hora de processamento perdida por um
+# arquivo que ninguem avisou que faltava. Checa aqui, na entrada.
+if (!dir.exists(BIOMA_DIR) ||
+    length(list.files(BIOMA_DIR, pattern = "\\.shp$")) == 0) {
+  stop("[06] data/raw_data/Biomas_250mil/ ausente ou sem .shp -- INSUMO MANUAL ",
+       "do IBGE (ver leia-me). E usada no recorte por bioma para o GEE, no fim ",
+       "deste script.", call. = FALSE)
+}
+message("[06] insumos conferidos: Biomas_250mil OK.")
 
 # =============================================================================
 # CORRECAO DE PESO/PRECO — CFEM (OURO e CASSITERITA)
@@ -249,14 +283,23 @@ corrige_mineral_3checks <- function(cfem_final, mineral_label, subs_keep, subs_c
 #     Exclui CONCESSAO DE LAVRA (mineracao industrial), que dominava a serie
 #     pre-2018 e tem estrutura de preco distinta do garimpo.
 #
-#   Dois subsets, MESMA faixa [30,300], processados SEPARADAMENTE:
-#     A) ANO >= 2018 -- faixa com respaldo empirico: 51%-94% das declaracoes
-#        ja caem em [30,300] SEM correcao alguma (2018:34,5% / 2019:52,3% /
-#        2020:51,1% / 2021:73,1% / 2022:84,6% / 2023:69,3% / 2024:77,7% /
-#        2025:94,4% / 2026:89,1%).
-#     B) ANO <= 2017 -- mesma faixa aplicada, mas aderencia observada de 0%
-#        em 2006/2007/2008/2010/2012/2015 (n=145 no total, 7,5% da base).
-#        Resultado esperado: alta taxa de dado_corrompido.
+#   Dois subsets, com faixas DIFERENTES, processados SEPARADAMENTE:
+#     A) ANO >= 2018 -- faixa [30, 300] R$/kg, com respaldo empirico: 51%-94%
+#        das declaracoes ja caem na faixa SEM correcao alguma (2018:34,5% /
+#        2019:52,3% / 2020:51,1% / 2021:73,1% / 2022:84,6% / 2023:69,3% /
+#        2024:77,7% / 2025:94,4% / 2026:89,1%).
+#     B) ANO <= 2017 -- faixa [5, 50] R$/kg, SEM respaldo empirico: aderencia
+#        observada de 0% em 2006/2007/2008/2010/2012/2015 (n=145, 7,5% da
+#        base). Resultado esperado: alta taxa de dado_corrompido.
+#
+# CORRIGIDO 2026-08-25 (auditoria F-17): este cabecalho afirmava "Dois subsets,
+# MESMA faixa [30,300]", o que contradizia a chamada da funcao logo abaixo, que
+# passa pmin_kg=5, pmax_kg=50 para o subset B. Texto alinhado ao comportamento.
+#
+# PENDENCIA METODOLOGICA (fora do escopo da auditoria, decisao de Theresa):
+# a faixa [5,50] do subset B nao tem respaldo empirico -- aderencia de 0% com
+# n=145. Alinhar o comentario resolve a contradicao documental, nao o problema.
+# Segue em revisao.
 # ============================================================================
 
 FASES_CASS <- c(

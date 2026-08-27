@@ -4,6 +4,20 @@
 # Municipio (Bloco 4), intersecao espacial TI/UC/Quilombola + embargos
 # (Bloco 5), e preparo do CFEM ate o ponto anterior a correcao de peso/preco
 # (leitura, limpeza, conversao de unidade, aliquota, VALORtot, preco_g_orig).
+#
+# Revisão 2026-08-25 (auditoria Sentinela da Amazônia):
+#   F-02  pma_attrs levava 8 colunas e NENHUMA flag de sobreposição — as flags
+#         eram calculadas, conferidas no QA e não viajavam para a tabela de
+#         CFEM. Como o filtro do dashboard ignora coluna ausente e devolve o
+#         conjunto inteiro, os botões de território não filtravam nada. A lista
+#         de colunas passa a derivar de FLAGS_SOBREPOSICAO (R/utils.R).
+#   F-01  Autos de infração do ICMBio incorporados por sobreposição espacial
+#         única (ponto contra polígono), com contagem, soma de multa,
+#         rastreabilidade por numero_ai e validação cruzada por nome_uc.
+#         Inclui teste de sensibilidade a 500 m (não entra no resultado).
+#   F-05  O CSV de disponibilidade de fontes passa a ser exportado também para
+#         a pasta do dashboard — diagnóstico que fica só em QA é igual a não
+#         existir, e foi por isso que a queda do ICMBio passou despercebida.
 ################################################################################
 
 rm(list = ls(all.names = TRUE))
@@ -18,6 +32,8 @@ suppressPackageStartupMessages({
   library(tidyterra)
   library(dplyr)
   library(tidyr)
+  library(tibble)
+  library(arrow)
   library(readr)
   library(purrr)
   library(stringr)
@@ -205,7 +221,8 @@ calc_overlap_named <- function(pma_lyr, tp_lyr, flag_name, name_col, out_name,
 }
 
 df_uc_pma <- calc_overlap_named(pma_amzl, uc_pi_resex, "UCov", "nome_uc", "UCname",
-                                extra_cols = "sigla_snuc") |> dplyr::rename(UCtype = sigla_snuc)
+                                extra_cols = c("sigla_snuc", "cd_cnuc")) |>
+  dplyr::rename(UCtype = sigla_snuc, UCcnuc = cd_cnuc)
 df_ti_pma <- calc_overlap_named(pma_amzl, ti_amzl, "TIov", "terrai_nom", "TIname")
 df_qui_pma <- calc_overlap_named(pma_amzl, qui_amzl, "QUIov", "nm_comunid", "QUIname")
 
@@ -250,6 +267,147 @@ pma_tp$emb_MTb <- relacionar_flag_opcional(pma_tp, EMBmtSIGA)
 pma_tp$emb_IB  <- relacionar_flag_opcional(pma_tp, EMBib)
 pma_tp$emb_IC  <- relacionar_flag_opcional(pma_tp, EMBic)
 
+# =============================================================================
+# AUTOS DE INFRACAO DO ICMBIO — SOBREPOSICAO ESPACIAL UNICA (auditoria F-01)
+# =============================================================================
+# Decisao 2026-08-25: a camada ENTRA. O shapefile e de PONTOS (um por auto
+# lavrado), entao o cruzamento e ponto-dentro-do-poligono do processo. O flag
+# binario inf_IC ja sai do relacionar_flag_opcional acima; aqui derivamos o que
+# ele nao da: quantos autos e quanto de multa por processo.
+#
+# Contexto do achado: o terra descartava a camada em silencio e ela nunca
+# contribuiu com nada. Confirmado no cruzamento final -- zero processos
+# sinalizados por esta fonte. Ver 02_pre_proc.R para o inventario do arquivo.
+#
+# TESTE DE SENSIBILIDADE (500 m): a coordenada marca o ponto do auto lavrado,
+# nao o centroide do dano, entao a sobreposicao estrita tende a SUBcontar. O
+# numero com tolerancia NAO entra no resultado -- e so para dimensionar o
+# efeito antes de fixar o criterio. Se a diferenca for marginal, fechamos no
+# estrito com respaldo empirico em vez de escolha default.
+resumir_infracoes_pontos <- function(pma, pts, label = "icmbio_infracoes",
+                                     col_valor = "valor_mult", col_id = "numero_ai",
+                                     tolerancias_m = c(50, 100, 250, 500, 1000),
+                                     qa_dir = QA_DIR) {
+
+  vazio <- tibble::tibble(PROCESSO = character(0), inf_IC_n = integer(0),
+                          inf_IC_multa = numeric(0), inf_IC_ais = character(0),
+                          inf_IC_cnucs = character(0))
+  if (is.null(pts) || nrow(pts) == 0) {
+    message("[05][", label, "] camada ausente ou vazia -- sem contagem por processo.")
+    return(vazio)
+  }
+
+  # valor_mult vem como texto na fonte; parse tolerante a separador BR e US.
+  v <- as.character(terra::values(pts)[[col_valor]])
+  v <- gsub("[^0-9,.-]", "", v)
+  v <- ifelse(grepl(",\\d{1,2}$", v), gsub("\\.", "", v), v)   # 1.234,56 -> 1234,56
+  v <- gsub(",", ".", v)
+  pts$.valor_num <- suppressWarnings(as.numeric(v))
+  n_valor_na <- sum(is.na(pts$.valor_num))
+  if (n_valor_na > 0) {
+    message("[05][", label, "] ", n_valor_na, " de ", nrow(pts),
+            " auto(s) sem valor de multa interpretavel -- somados como 0.")
+  }
+
+  # --- criterio adotado: sobreposicao estrita (ponto dentro do poligono) ------
+  rel <- terra::relate(pts, pma, "intersects")   # linhas = pontos, colunas = processos
+  hits <- which(rel, arr.ind = TRUE)
+
+  if (nrow(hits) == 0) {
+    message("[05][", label, "] nenhum auto caiu dentro de poligono de processo.")
+    return(vazio)
+  }
+
+  df_hits <- tibble::tibble(
+    PROCESSO = as.character(pma$PROCESSO)[hits[, "col"]],
+    ai       = as.character(terra::values(pts)[[col_id]])[hits[, "row"]],
+    valor    = tidyr::replace_na(pts$.valor_num[hits[, "row"]], 0),
+    cnuc     = trimws(as.character(terra::values(pts)[["cnuc"]])[hits[, "row"]])
+  )
+
+  resumo <- df_hits |>
+    dplyr::group_by(PROCESSO) |>
+    dplyr::summarise(
+      inf_IC_n     = dplyr::n_distinct(ai),
+      inf_IC_multa = sum(valor, na.rm = TRUE),
+      inf_IC_ais   = paste(unique(ai[!is.na(ai) & nzchar(ai)]), collapse = "|"),
+      inf_IC_cnucs = paste(unique(cnuc[!is.na(cnuc) & nzchar(cnuc)]), collapse = "|"),
+      .groups = "drop"
+    )
+
+  # --- teste de sensibilidade (nao entra no resultado) -----------------------
+  # AMPLIADO 2026-08-25: a primeira rodada testou so 500 m e deu +112% (347 ->
+  # 735 processos). Longe de marginal, entao a curva importa: varios raios
+  # mostram onde ela sobe e se ha patamar. 500 m em area de garimpo ja pode
+  # capturar processo vizinho, entao o numero sozinho nao decide.
+  n_estrito <- nrow(resumo)
+  curva <- purrr::map_dfr(tolerancias_m, \(w) {
+    n <- tryCatch({
+      sum(terra::is.related(pma, terra::buffer(pts, width = w), "intersects"))
+    }, error = function(e) NA_integer_)
+    tibble::tibble(criterio = paste0("buffer_", w, "m"), raio_m = w, n_processos = n)
+  })
+
+  curva <- dplyr::bind_rows(
+    tibble::tibble(criterio = "estrito", raio_m = 0L, n_processos = n_estrito),
+    curva
+  ) |>
+    dplyr::mutate(delta_pct = round(100 * (n_processos - n_estrito) / max(n_estrito, 1), 1))
+
+  message("[05][", label, "] SENSIBILIDADE (nao entra no resultado):")
+  print(as.data.frame(curva), row.names = FALSE)
+
+  readr::write_csv(curva, file.path(qa_dir, "icmbio_infracoes_sensibilidade_buffer.csv"))
+
+  resumo
+}
+
+df_inf_ic <- resumir_infracoes_pontos(pma_tp, INFic)
+
+pma_tp <- pma_tp |>
+  tidyterra::left_join(df_inf_ic, by = "PROCESSO") |>
+  dplyr::mutate(
+    inf_IC_n     = tidyr::replace_na(inf_IC_n, 0L),
+    inf_IC_multa = tidyr::replace_na(inf_IC_multa, 0)
+  )
+
+# VALIDACAO CRUZADA, independente da geometria: se o ponto caiu no poligono do
+# processo E o codigo CNUC declarado no auto bate com o codigo da UC que o
+# processo sobrepoe, ha confirmacao por dois caminhos distintos.
+#
+# POR CODIGO, NAO POR NOME (correcao 2026-08-25): os nomes nao sao comparaveis
+# entre as duas fontes -- o ICMBio abrevia ("FLONA do Jamari") e o CNUC escreve
+# por extenso ("FLORESTA NACIONAL DO JAMARI"). A primeira versao comparava
+# texto e devolvia 0 acertos em 347 processos, o que parecia achado e era
+# artefato de vocabulario. O campo cd_cnuc (CNUC) e o campo cnuc (autos) usam o
+# MESMO formato, ex: "0000.00.0118".
+#
+# NA = nao avaliavel (processo sem auto, ou sem UC sobreposta). Divergencia nao
+# invalida o flag: pode ser auto lavrado fora de UC, ou processo sobrepondo mais
+# de uma. Serve como grau de confianca para a investigacao.
+if (!"UCcnuc" %in% names(pma_tp)) {
+  warning("[05] UCcnuc ausente -- validacao cruzada indisponivel. ",
+          "Conferir se o 02 preservou cd_cnuc no CNUC.")
+  pma_tp$inf_IC_uc_confere <- NA
+} else {
+  pma_tp$inf_IC_uc_confere <- mapply(
+    function(cnucs_auto, cnuc_proc) {
+      if (is.na(cnucs_auto) || !nzchar(cnucs_auto) ||
+          is.na(cnuc_proc)  || !nzchar(cnuc_proc)) return(NA)
+      any(strsplit(cnucs_auto, "\\|")[[1]] %in% strsplit(cnuc_proc, "\\|")[[1]])
+    },
+    as.character(pma_tp$inf_IC_cnucs),
+    as.character(pma_tp$UCcnuc)
+  )
+}
+
+n_com_auto  <- sum(pma_tp$inf_IC_n > 0, na.rm = TRUE)
+n_avaliavel <- sum(!is.na(pma_tp$inf_IC_uc_confere))
+n_confere   <- sum(pma_tp$inf_IC_uc_confere, na.rm = TRUE)
+message(sprintf(
+  "[05][icmbio_infracoes] processos com auto: %d | avaliaveis (tem auto E UC sobreposta): %d | codigo CNUC confere: %d",
+  n_com_auto, n_avaliavel, n_confere))
+
 # --- Registro em QA: quais fontes de embargo/infracao faltaram nesta execucao
 fontes_check <- tibble::tibble(
   fonte = c("sema_mt_embargos", "sema_mt_embargos_siga", "ibama_embargos", "icmbio_embargos",
@@ -258,6 +416,12 @@ fontes_check <- tibble::tibble(
                 !is.null(INFmtSIGA), !is.null(INFic))
 )
 readr::write_csv(fontes_check, file.path(QA_DIR, "fontes_embargo_infracao_disponibilidade.csv"))
+# Tambem para a pasta do dashboard: diagnostico que fica so em CSV de QA e o
+# mesmo que nao existir. Foi por isso que a queda do ICMBio (F-05) passou
+# despercebida -- o mecanismo de deteccao existia e ninguem leu.
+SHINY_DIR_05 <- here::here("data", "result_shiny")
+dir.create(SHINY_DIR_05, recursive = TRUE, showWarnings = FALSE)
+readr::write_csv(fontes_check, file.path(SHINY_DIR_05, "fontes_disponibilidade.csv"))
 if (any(!fontes_check$disponivel)) {
   message("[05][embargos] ATENCAO — fonte(s) indisponivel(is) nesta execucao: ",
           paste(fontes_check$fonte[!fontes_check$disponivel], collapse = ", "),
@@ -265,8 +429,9 @@ if (any(!fontes_check$disponivel)) {
 }
 
 # --- Check/parecer: quantos processos carregam cada flag de sobreposição ------
-flags_sobrep <- c("TIov","UCov","QUIov","TIov10km","UCov2km","QUIov10km",
-                  "inf_MT","inf_IC","emb_MTa","emb_MTb","emb_IB","emb_IC")
+# flags_sobrep agora vem de R/utils.R (FLAGS_SOBREPOSICAO), a mesma fonte usada
+# na propagacao de colunas do Bloco 6 -- ver auditoria F-02.
+flags_sobrep <- FLAGS_SOBREPOSICAO
 sobrep_check <- as.data.frame(pma_tp) |>
   dplyr::summarise(dplyr::across(dplyr::all_of(flags_sobrep), ~ sum(.x == 1L, na.rm = TRUE))) |>
   tidyr::pivot_longer(everything(), names_to = "flag", values_to = "n_processos") |>
@@ -371,9 +536,38 @@ cfem_arr_amzl1 <- cfem_arr_amzl0 |>
     SUBSarrSIM = classificar_grupo(SUBSarr)
   )
 
+# --- Colunas propagadas para a tabela de CFEM (auditoria F-02) ----------------
+# Antes esta selecao levava 8 colunas e NENHUMA flag de sobreposicao. As flags
+# eram calculadas logo acima, conferidas no QA, e simplesmente nao viajavam.
+# Como o filtro do dashboard ignora coluna ausente e devolve o conjunto
+# inteiro, os botoes "Territorios Protegidos" nao davam erro: nao filtravam.
+#
+# A lista NAO e escrita a mao: deriva de flags_sobrep (o mesmo vetor usado no
+# check de QA) mais as colunas de nome/tipo e as derivadas do ICMBio. Assim,
+# incluir uma fonte nova nao depende de alguem lembrar de atualizar um select()
+# -- que foi exatamente como o bug nasceu.
+cols_nomes_terr <- c("UCname", "UCtype", "UCcnuc", "TIname", "QUIname",
+                     "UCname_ov", "UCtype_ov", "TIname_ov", "QUIname_ov")
+cols_inf_ic     <- c("inf_IC_n", "inf_IC_multa", "inf_IC_ais", "inf_IC_cnucs",
+                     "inf_IC_uc_confere")
+cols_base       <- c("PROCESSO", "AREA_HA", "FASE", "ULT_EVENTO", "TITULAR",
+                     "SUBS", "TIPO_REQcm", "CPF_CNPJcm")
+
+cols_propagar <- c(cols_base, FLAGS_SOBREPOSICAO, cols_nomes_terr, cols_inf_ic)
+
+ausentes_prop <- setdiff(cols_propagar, names(as.data.frame(pma_tp)))
+if (length(ausentes_prop) > 0) {
+  stop("[05] colunas previstas para propagacao nao existem em pma_tp: ",
+       paste(ausentes_prop, collapse = ", "),
+       " -- conferir os blocos de sobreposicao acima.")
+}
+
 pma_attrs <- as.data.frame(pma_tp) |>
-  dplyr::select(PROCESSO, AREA_HA, FASE, ULT_EVENTO, TITULAR, SUBS, TIPO_REQcm, CPF_CNPJcm) |>
+  dplyr::select(dplyr::all_of(cols_propagar)) |>
   dplyr::distinct(PROCESSO, .keep_all = TRUE)
+
+message("[05][propagacao] ", length(cols_propagar),
+        " colunas levadas para a tabela de CFEM (antes: 8, sem nenhuma flag).")
 
 cfem_arr_amzl2 <- dplyr::left_join(cfem_arr_amzl1, pma_attrs, by = "PROCESSO") |>
   dplyr::mutate(dplyr::across(dplyr::where(is.numeric), ~ ifelse(is.nan(.x) | is.infinite(.x), NA_real_, .x)))

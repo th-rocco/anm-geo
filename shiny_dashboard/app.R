@@ -207,8 +207,11 @@ lk_decl_tab2     <- .read_rds("lk_decl_tab2.rds")
   p <- file.path(res_dir, name)
   if (file.exists(p)) readRDS(p) else NULL
 }
+
+# isTRUE() so aceita escalar; aqui precisamos do equivalente vetorizado,
+# tratando NA como FALSE (nao queremos descartar linha por flag ausente).
+isTRUE_vec <- function(x) !is.na(x) & x
 micro_processos     <- .read_rds_opt("micro_processos.rds")
-micro_eventos       <- .read_rds_opt("micro_eventos.rds")
 micro_pessoas       <- .read_rds_opt("micro_pessoas.rds")
 micro_pessoa_resumo <- .read_rds_opt("micro_pessoa_resumo.rds")
 micro_substancias   <- .read_rds_opt("micro_substancias.rds")
@@ -233,6 +236,39 @@ eventos_serie                <- .read_rds_opt("eventos_serie.rds")
 situacao_atual               <- .read_rds_opt("situacao_atual.rds")
 fases_processo_tabela        <- .read_rds_opt("fases_processo_tabela.rds")
 multas_infracoes_tabela      <- .read_rds_opt("multas_infracoes_tabela.rds")
+
+# ---- Historico de eventos da aba 4 (F-03, 2026-08-25) -----------------------
+# O app carregava "micro_eventos.rds", que NENHUM script do pipeline gerava --
+# e o .read_rds_opt devolve NULL em silencio, entao a tabela de historico
+# exibia "Dados indisponiveis" de forma permanente e a exportacao do dossie
+# saia sem a secao de eventos. Ninguem via porque nada reclamava.
+#
+# NAO criamos um arquivo novo: eventos_serie.rds (saida do 07) e a MESMA
+# tabela de origem (micro_processo_evento) ja cruzada com o dicionario, entao
+# ja traz 'papel', que e justamente a coluna que faltava e o motivo de o 08
+# nao conseguir gerar isso sozinho. Dois artefatos com a mesma procedencia e
+# como eles divergem; no banco isso vira view, nao tabela.
+#
+# EVENTO SINTETICO FICA DE FORA: o Bloco D do 07 insere um FECHA na data de
+# vencimento de titulo sem renovacao protocolada. E inferencia nossa, derivada
+# da data, NAO um evento publicado pela ANM. Se aparecesse aqui sem distincao,
+# o usuario veria um fechamento que nao encontraria ao conferir no cadastro --
+# caro num produto investigativo.
+micro_eventos <- if (!is.null(eventos_serie)) {
+  ev <- eventos_serie
+  if ("evento_sintetico" %in% names(ev)) {
+    ev <- ev[!isTRUE_vec(ev$evento_sintetico), , drop = FALSE]
+  }
+  cols <- intersect(c("processo", "dtevento", "dsevento", "papel",
+                      "tipo_proc", "sufixo", "dspublicacaodou"), names(ev))
+  out <- ev[, cols, drop = FALSE]
+  names(out)[names(out) == "dtevento"]        <- "data"
+  names(out)[names(out) == "dsevento"]        <- "evento"
+  names(out)[names(out) == "dspublicacaodou"] <- "publicacao_dou"
+  out[order(out$processo, out$data), , drop = FALSE]
+} else {
+  NULL
+}
 
 dossie_ok  <- !is.null(dossie_resumo_processo)
 inapto_ok  <- dossie_ok  # nome mantido por compatibilidade com o resto do server abaixo
@@ -357,13 +393,19 @@ relatorio_selecao <- function(df, mensal = TRUE, list_cap = 10) {
     add_ov("QUIov", "QUIname", "Comunidades Quilombolas")
   )
   if (identical(bloco_ov[-1], list(NULL, NULL, NULL))) bloco_ov <- "Sobreposição com Territórios Protegidos: Nenhuma."
+  # F-06 (2026-08-25): este bloco anunciava "Proximidade (10 km)" para os tres
+  # territorios e lia "UCov10km", que nao existe. Os raios sao DIFERENTES por
+  # decisao metodologica (05_integracao_final.R): TI e quilombola a 10 km, UC a
+  # 2 km. O texto agora explicita cada raio em vez de afirmar um numero unico.
   bloco_buf <- c(
-    "Proximidade (10 km):",
-    add_ov("TIov10km",  "TIname",  "Terras Indígenas"),
-    add_ov("UCov10km",  "UCname",  "Unidades de Conservação"),
-    add_ov("QUIov10km", "QUIname", "Comunidades Quilombolas")
+    "Proximidade de Territórios Protegidos:",
+    add_ov("TIov10km",  "TIname_ov",  "Terras Indígenas (10 km)"),
+    add_ov("UCov2km",   "UCname_ov",  "Unidades de Conservação (2 km)"),
+    add_ov("QUIov10km", "QUIname_ov", "Comunidades Quilombolas (10 km)")
   )
-  if (identical(bloco_buf[-1], list(NULL, NULL, NULL))) bloco_buf <- "Proximidade (10 km): Não."
+  if (identical(bloco_buf[-1], list(NULL, NULL, NULL))) {
+    bloco_buf <- "Proximidade de Territórios Protegidos: Nenhuma."
+  }
 
   paste(c(
     linhas, "",
@@ -462,8 +504,13 @@ ui <- page_navbar(
                       choices = fases_all, selected = c("LAVRA GARIMPEIRA", "REQUERIMENTO DE LAVRA GARIMPEIRA"),
                       multiple = TRUE, options = picker_opts),
           checkboxGroupButtons("ov_flags_tab1", "Territórios Protegidos:",
+                      # F-06 (2026-08-25): a UI oferecia "UCov10km", que NAO existe
+                      # nos dados -- o pipeline produz UCov2km. O filtro era inerte e o
+                      # rotulo dizia 10 km quando o raio real da UC e 2 km. Os raios sao
+                      # DIFERENTES por decisao metodologica (ver 05_integracao_final.R):
+                      # TI e quilombola a 10 km, UC a 2 km.
                       choices = c("UC" = "UCov", "TI" = "TIov", "QUI" = "QUIov",
-                                  "UC (10 km)" = "UCov10km", "TI (10 km)" = "TIov10km", "QUI (10 km)" = "QUIov10km"),
+                                  "UC (2 km)" = "UCov2km", "TI (10 km)" = "TIov10km", "QUI (10 km)" = "QUIov10km"),
                       selected = c(), direction = "horizontal",
                       checkIcon = list(yes = icon("check"), no = icon("minus")), size = "sm", status = "light"),
           sliderInput("periodo_tab1", "Período (anos):",
@@ -517,8 +564,13 @@ ui <- page_navbar(
                       choices = fases_all, multiple = TRUE,
                       selected = c("LAVRA GARIMPEIRA", "REQUERIMENTO DE LAVRA GARIMPEIRA"), options = picker_opts),
           checkboxGroupButtons("ov_flags_tab2", "Territórios Protegidos:",
+                      # F-06 (2026-08-25): a UI oferecia "UCov10km", que NAO existe
+                      # nos dados -- o pipeline produz UCov2km. O filtro era inerte e o
+                      # rotulo dizia 10 km quando o raio real da UC e 2 km. Os raios sao
+                      # DIFERENTES por decisao metodologica (ver 05_integracao_final.R):
+                      # TI e quilombola a 10 km, UC a 2 km.
                       choices = c("UC" = "UCov", "TI" = "TIov", "QUI" = "QUIov",
-                                  "UC (10 km)" = "UCov10km", "TI (10 km)" = "TIov10km", "QUI (10 km)" = "QUIov10km"),
+                                  "UC (2 km)" = "UCov2km", "TI (10 km)" = "TIov10km", "QUI (10 km)" = "QUIov10km"),
                       selected = c(), direction = "horizontal",
                       checkIcon = list(yes = icon("check"), no = icon("minus")), size = "sm", status = "light"),
           sliderInput("periodo_tab2", "Período (anos):",
@@ -574,8 +626,13 @@ ui <- page_navbar(
                       choices = fases_all, selected = c("LAVRA GARIMPEIRA", "REQUERIMENTO DE LAVRA GARIMPEIRA"),
                       multiple = TRUE, options = picker_opts),
           checkboxGroupButtons("ov_flags_tab3", "Territórios Protegidos:",
+                      # F-06 (2026-08-25): a UI oferecia "UCov10km", que NAO existe
+                      # nos dados -- o pipeline produz UCov2km. O filtro era inerte e o
+                      # rotulo dizia 10 km quando o raio real da UC e 2 km. Os raios sao
+                      # DIFERENTES por decisao metodologica (ver 05_integracao_final.R):
+                      # TI e quilombola a 10 km, UC a 2 km.
                       choices = c("UC" = "UCov", "TI" = "TIov", "QUI" = "QUIov",
-                                  "UC (10 km)" = "UCov10km", "TI (10 km)" = "TIov10km", "QUI (10 km)" = "QUIov10km"),
+                                  "UC (2 km)" = "UCov2km", "TI (10 km)" = "TIov10km", "QUI (10 km)" = "QUIov10km"),
                       selected = c(), direction = "horizontal",
                       checkIcon = list(yes = icon("check"), no = icon("minus")), size = "sm", status = "light"),
           selectInput("agrupamento_tab3", "Visualiza linhas por:",
@@ -693,9 +750,30 @@ server <- function(input, output, session) {
     }, ignoreInit = TRUE)
   }
 
+  # F-02 (2026-08-25): esta funcao devolvia o conjunto INTEIRO quando nenhuma
+  # das colunas pedidas existia no data.frame -- sem erro, sem aviso. Foi o que
+  # fez os botoes "Territorios Protegidos" das abas 1 e 3 parecerem funcionar
+  # sem filtrar nada por meses (o 05 nao propagava as flags para a tabela de
+  # CFEM). O intersect tambem engolia o caso PARCIAL: com 3 de 6 colunas
+  # presentes, filtrava pelas 3 e nao dizia nada.
+  #
+  # Agora avisa em qualquer descasamento. Nao usa stop(): derrubar a sessao do
+  # usuario por coluna faltante e pior que mostrar o resultado com aviso -- mas
+  # o silencio, que foi o problema original, acabou.
   filtra_sobrepos <- function(df, flags) {
     if (length(flags) == 0) return(df)
-    cols_ok <- intersect(flags, names(df))
+    cols_ok       <- intersect(flags, names(df))
+    cols_faltando <- setdiff(flags, names(df))
+
+    if (length(cols_faltando) > 0) {
+      msg <- paste0("[app][filtra_sobrepos] coluna(s) de flag ausente(s) nos dados: ",
+                    paste(cols_faltando, collapse = ", "),
+                    " -- filtro IGNORADO para essa(s). Conferir a propagacao no ",
+                    "05_integracao_final.R (FLAGS_SOBREPOSICAO em R/utils.R).")
+      warning(msg, call. = FALSE)
+      showNotification(msg, type = "warning", duration = 12)
+    }
+
     if (length(cols_ok) == 0) return(df)
     df |> dplyr::filter(rowSums(dplyr::across(dplyr::all_of(cols_ok), ~ dplyr::coalesce(.x, 0))) >= 1)
   }
@@ -1301,13 +1379,45 @@ server <- function(input, output, session) {
     if (is.null(df)) return(DT::datatable(data.frame(Aviso = "Dados indisponíveis.")))
     if ("data" %in% names(df)) df <- df[order(df$data, decreasing = TRUE), , drop = FALSE]
 
-    # Cores por papel (eventos decisivos na logica de aptidao; NAO_CLASSIFICADO
-    # = evento existe no historico bruto mas nao entra na maquina de estado)
-    papel_cor <- c(MUDA_FASE = "#D4EDDA", FECHA = "#F8D7DA", SUSPENDE = "#FFF3CD", RETOMA = "#D1ECF1", NAO_CLASSIFICADO = "#F5F5F5")
-    papel_tx  <- c(MUDA_FASE = "#155724", FECHA = "#721C24", SUSPENDE = "#856404", RETOMA = "#0C5460", NAO_CLASSIFICADO = "#6C757D")
+    # F-09 (2026-08-25): este mapa listava 5 valores (MUDA_FASE, FECHA,
+    # SUSPENDE, RETOMA, NAO_CLASSIFICADO) quando existem 15 na base real --
+    # confirmado no dicionario v2 (2.920 eventos). PROTOC e as dez variantes
+    # NEUTRO_* ficavam sem destaque, e NAO_CLASSIFICADO nem existe mais (foi
+    # eliminado na redesenho do 07; o que nao classifica vira NEUTRO_outros).
+    #
+    # Os NEUTRO_* compartilham o mesmo cinza de propósito: sao ruido de fundo
+    # da linha do tempo, nao decisao. O que precisa saltar aos olhos e o que
+    # abre, fecha, suspende ou retoma.
+    NEUTRO_BG <- "#F5F5F5"; NEUTRO_TX <- "#6C757D"
+    papel_cor <- c(
+      MUDA_FASE = "#D4EDDA", FECHA = "#F8D7DA", SUSPENDE = "#FFF3CD",
+      RETOMA    = "#D1ECF1", PROTOC = "#E2E3F3",
+      NEUTRO_outros = NEUTRO_BG, NEUTRO_barragem = NEUTRO_BG,
+      NEUTRO_transferencia_direitos = NEUTRO_BG, NEUTRO_financeiro = NEUTRO_BG,
+      NEUTRO_processual = NEUTRO_BG, NEUTRO_relatorio = NEUTRO_BG,
+      NEUTRO_negado = NEUTRO_BG, NEUTRO_arquiv_punitivo = NEUTRO_BG,
+      NEUTRO_marco_informativo = NEUTRO_BG, NEUTRO_covid_prorrogacao = NEUTRO_BG
+    )
+    papel_tx <- c(
+      MUDA_FASE = "#155724", FECHA = "#721C24", SUSPENDE = "#856404",
+      RETOMA    = "#0C5460", PROTOC = "#3F3D8F",
+      NEUTRO_outros = NEUTRO_TX, NEUTRO_barragem = NEUTRO_TX,
+      NEUTRO_transferencia_direitos = NEUTRO_TX, NEUTRO_financeiro = NEUTRO_TX,
+      NEUTRO_processual = NEUTRO_TX, NEUTRO_relatorio = NEUTRO_TX,
+      NEUTRO_negado = NEUTRO_TX, NEUTRO_arquiv_punitivo = NEUTRO_TX,
+      NEUTRO_marco_informativo = NEUTRO_TX, NEUTRO_covid_prorrogacao = NEUTRO_TX
+    )
 
-    # Remove coluna papel antes de exibir (usada só para estilo)
+    # Lista fixa volta a ficar incompleta na proxima versao do dicionario. Em
+    # vez de mapa exaustivo, avisa e deixa o valor novo sem cor (fallback do
+    # DT), que e visivel sem quebrar a tabela.
     papel_col <- if ("papel" %in% names(df)) df$papel else rep(NA_character_, nrow(df))
+    papeis_novos <- setdiff(unique(stats::na.omit(papel_col)), names(papel_cor))
+    if (length(papeis_novos) > 0) {
+      warning("[app][historico] papel(is) sem cor definida: ",
+              paste(papeis_novos, collapse = ", "),
+              " -- acrescentar ao mapa em app.R.", call. = FALSE)
+    }
     df_show <- df[, setdiff(names(df), "papel"), drop = FALSE]
 
     nm <- names(df_show); cn <- nm
@@ -1347,8 +1457,13 @@ server <- function(input, output, session) {
   output$cp_mapa <- leaflet::renderLeaflet({
     leaflet::leaflet(options = leaflet::leafletOptions(preferCanvas = TRUE)) |>
       leaflet::addProviderTiles("Esri.WorldImagery", group = "Satélite") |>
-      leaflet::addProviderTiles("CartoDB.Positron", group = "CartoDB") |>
-      leaflet::addLayersControl(baseGroups = c("Satélite", "CartoDB"),
+      # BASEMAP (2026-08-25): CartoDB.Positron passou a exigir chave de API e o
+      # mapa desta aba abria nele por ser o primeiro da lista -- resultado:
+      # "API key required" so aqui, enquanto a aba 4 (que abre no Esri) seguia
+      # normal. Trocado por Esri.WorldGrayCanvas, equivalente visual e sem
+      # chave. Nada a ver com o pipeline: e mudanca de politica do provedor.
+      leaflet::addProviderTiles("Esri.WorldGrayCanvas", group = "Mapa claro") |>
+      leaflet::addLayersControl(baseGroups = c("Satélite", "Mapa claro"),
                                 options = leaflet::layersControlOptions(collapsed = FALSE)) |>
       leaflet::setView(lng = -55, lat = -5, zoom = 4)
   })
@@ -1927,7 +2042,12 @@ server <- function(input, output, session) {
 
   output$mapa_cfem_pma_tab3 <- leaflet::renderLeaflet({
     leaflet::leaflet(options = leaflet::leafletOptions(minZoom = 2, maxZoom = 18, preferCanvas = TRUE)) |>
-      leaflet::addProviderTiles("CartoDB.Positron", group = "CartoDB") |>
+      # BASEMAP (2026-08-25): CartoDB.Positron passou a exigir chave de API e o
+      # mapa desta aba abria nele por ser o primeiro da lista -- resultado:
+      # "API key required" so aqui, enquanto a aba 4 (que abre no Esri) seguia
+      # normal. Trocado por Esri.WorldGrayCanvas, equivalente visual e sem
+      # chave. Nada a ver com o pipeline: e mudanca de politica do provedor.
+      leaflet::addProviderTiles("Esri.WorldGrayCanvas", group = "Mapa claro") |>
       leaflet::addProviderTiles("Esri.WorldImagery", group = "Satélite") |>
       leaflet::addPolygons(data = uc, group = "Unidades de Conservação",
                            color = "#78c679", weight = 0.5, opacity = 0.8, fillOpacity = 0.5,
@@ -1941,7 +2061,7 @@ server <- function(input, output, session) {
                            popup = ~paste0("<b>Comunidade:</b> ", nm_comunid,
                                            if ("fase" %in% names(qui)) paste0("<br><b>Fase:</b> ", fase) else "")) |>
       leaflet::addLayersControl(
-        baseGroups = c("CartoDB", "Satélite"),
+        baseGroups = c("Mapa claro", "Satélite"),
         overlayGroups = c("Processos Minerários", "PMAs do mesmo Titular", "PMAs da mesma Parte Declarante",
                           "Unidades de Conservação", "Terras Indígenas", "Comunidades Quilombolas"),
         options = leaflet::layersControlOptions(collapsed = FALSE)) |>

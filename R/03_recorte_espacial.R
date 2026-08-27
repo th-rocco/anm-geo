@@ -1,5 +1,16 @@
 ################################################################################
 # 03_recorte_espacial.R
+#
+# Revisão 2026-08-25 (auditoria Sentinela da Amazônia):
+#   F-14  BLOCO 0: checagem de insumos no início. Antes o script abria os três
+#         shapefiles de território e a malha da Amazônia Legal sem proteção
+#         nenhuma; fonte ausente virava erro de leitura do terra, sem dizer o
+#         que faltava nem qual etapa produz o arquivo.
+#   F-01  Leituras vetoriais passam por ler_vetor(), que compara registros no
+#         arquivo com feições lidas e falha quando a fonte é obrigatória.
+#
+# NOTA: Limites_Amazonia_Legal_2024/ é INSUMO MANUAL do IBGE — não é baixado
+# pelo 01 (geoftp devolveu 404 nas duas URLs testadas em 2026-08-25).
 ################################################################################
 
 rm(list = ls(all.names = TRUE))
@@ -16,6 +27,7 @@ suppressPackageStartupMessages({
   library(tidyr)
   library(readr)
   library(purrr)
+  library(tibble)
   library(stringr)
   library(here)
 })
@@ -30,6 +42,45 @@ QA_DIR       <- here::here("data", "_qa", "03_recorte_espacial")
 AMZL_DIR     <- here::here("data", "raw_data", "Limites_Amazonia_Legal_2024")
 
 for (d in c(CLEAN_DIR, QA_DIR)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
+
+# =============================================================================
+# BLOCO 0 — CHECAGEM DE INSUMOS (auditoria F-14 / F-04)
+# =============================================================================
+# Antes, este script abria os shapefiles de território e a malha da Amazônia
+# Legal sem nenhuma proteção: fonte ausente virava erro de leitura do terra,
+# sem dizer o que faltava nem qual etapa produz o arquivo. E as bases do IBGE
+# não constavam de nenhum download (agora são insumo manual, ver 01).
+#
+# Falha aqui, nomeando o que falta e o que rodar para obter.
+insumos_03 <- tibble::tribble(
+  ~caminho,                                                    ~origem,
+  file.path(PRE_PROC_DIR, "cadastro_mineiro.csv"),             "02_pre_proc.R (ANM SCM consolidation)",
+  file.path(PRE_PROC_DIR, "sigmine_pma.shp"),                  "02_pre_proc.R (SIGMINE PMA extraction)",
+  file.path(PRE_PROC_DIR, "terras_indigenas.shp"),             "02_pre_proc.R (FUNAI TI)",
+  file.path(PRE_PROC_DIR, "unidades_conservacao.shp"),         "02_pre_proc.R (MMA CNUC)",
+  file.path(PRE_PROC_DIR, "quilombolas.shp"),                  "02_pre_proc.R (INCRA Quilombolas)"
+)
+
+faltando_03 <- dplyr::filter(insumos_03, !file.exists(caminho))
+
+# A Amazônia Legal é insumo MANUAL do IBGE: checa a pasta, não um arquivo fixo.
+amzl_shp <- list.files(AMZL_DIR, pattern = "\\.shp$", full.names = TRUE)
+if (!dir.exists(AMZL_DIR) || length(amzl_shp) == 0) {
+  faltando_03 <- dplyr::bind_rows(
+    faltando_03,
+    tibble::tibble(caminho = AMZL_DIR,
+                   origem  = "INSUMO MANUAL do IBGE — baixar e extrair (ver leia-me)")
+  )
+}
+
+if (nrow(faltando_03) > 0) {
+  message("\n[03] INSUMOS AUSENTES:")
+  purrr::pwalk(faltando_03, \(caminho, origem)
+               message("  - ", basename(caminho), "  <-  ", origem))
+  stop("[03] ", nrow(faltando_03), " insumo(s) ausente(s). Ver lista acima.",
+       call. = FALSE)
+}
+message("[03] insumos conferidos: ", nrow(insumos_03) + 1, " OK.")
 
 # =============================================================================
 # BLOCO 1 — CADASTRO MINEIRO (SCM)
@@ -131,7 +182,7 @@ save_ckpt(cm_unique, "03_cm_unique")
 
 cm_unique <- load_ckpt("03_cm_unique")
 
-pma0 <- terra::vect(file.path(PRE_PROC_DIR, "sigmine_pma.shp"))
+pma0 <- ler_vetor(file.path(PRE_PROC_DIR, "sigmine_pma.shp"), label = "PMA")
 
 pma1 <- pma0 |>
   dplyr::filter(AREA_HA > 0) |>
@@ -265,12 +316,12 @@ pma_cm <- load_ckpt("03_pma_cm") |>
   dplyr::mutate(dplyr::across(dplyr::where(is.numeric),
                               ~ ifelse(is.nan(.x) | is.infinite(.x), NA_real_, .x)))
 
-amzl <- terra::vect(list.files(AMZL_DIR, pattern = "\\.shp$", full.names = TRUE)[1]) |>
+amzl <- ler_vetor(amzl_shp[1], label = "AMZ_LEGAL") |>
   terra::project(terra::crs(pma_cm))
 
-ti  <- terra::vect(file.path(PRE_PROC_DIR, "terras_indigenas.shp"))
-uc  <- terra::vect(file.path(PRE_PROC_DIR, "unidades_conservacao.shp"))
-qui <- terra::vect(file.path(PRE_PROC_DIR, "quilombolas.shp"))
+ti  <- ler_vetor(file.path(PRE_PROC_DIR, "terras_indigenas.shp"),     label = "TI")
+uc  <- ler_vetor(file.path(PRE_PROC_DIR, "unidades_conservacao.shp"), label = "UC")
+qui <- ler_vetor(file.path(PRE_PROC_DIR, "quilombolas.shp"),          label = "QUILOMBOLA")
 
 intersect_ids <- terra::is.related(pma_cm, amzl, "intersects")
 pma_amzl       <- pma_cm[intersect_ids, ]
