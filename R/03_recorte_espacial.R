@@ -1,16 +1,5 @@
 ################################################################################
 # 03_recorte_espacial.R
-#
-# Revisão 2026-08-25 (auditoria Sentinela da Amazônia):
-#   F-14  BLOCO 0: checagem de insumos no início. Antes o script abria os três
-#         shapefiles de território e a malha da Amazônia Legal sem proteção
-#         nenhuma; fonte ausente virava erro de leitura do terra, sem dizer o
-#         que faltava nem qual etapa produz o arquivo.
-#   F-01  Leituras vetoriais passam por ler_vetor(), que compara registros no
-#         arquivo com feições lidas e falha quando a fonte é obrigatória.
-#
-# NOTA: Limites_Amazonia_Legal_2024/ é INSUMO MANUAL do IBGE — não é baixado
-# pelo 01 (geoftp devolveu 404 nas duas URLs testadas em 2026-08-25).
 ################################################################################
 
 rm(list = ls(all.names = TRUE))
@@ -44,13 +33,8 @@ AMZL_DIR     <- here::here("data", "raw_data", "Limites_Amazonia_Legal_2024")
 for (d in c(CLEAN_DIR, QA_DIR)) dir.create(d, recursive = TRUE, showWarnings = FALSE)
 
 # =============================================================================
-# BLOCO 0 — CHECAGEM DE INSUMOS (auditoria F-14 / F-04)
+# BLOCO 0
 # =============================================================================
-# Antes, este script abria os shapefiles de território e a malha da Amazônia
-# Legal sem nenhuma proteção: fonte ausente virava erro de leitura do terra,
-# sem dizer o que faltava nem qual etapa produz o arquivo. E as bases do IBGE
-# não constavam de nenhum download (agora são insumo manual, ver 01).
-#
 # Falha aqui, nomeando o que falta e o que rodar para obter.
 insumos_03 <- tibble::tribble(
   ~caminho,                                                    ~origem,

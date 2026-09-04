@@ -27,15 +27,6 @@ dir.create(MANIFEST_DIR, recursive = TRUE, showWarnings = FALSE)
 # --- Credenciais (decisão 2026-08, auditoria F-15) ----------------------------
 # A authkey do geoserver da SEMA-MT estava embutida na URL, em texto claro, no
 # código versionado. Migrada para variável de ambiente.
-#
-# Defina no .Renviron da raiz do projeto (que deve estar no .gitignore):
-#   SEMA_MT_AUTHKEY=<chave>
-#
-# ATENÇÃO: mover a chave para cá NÃO a remove do histórico do versionamento.
-# A chave anterior precisa ser rotatada junto com esta mudança.
-#
-# SEMA-MT é fonte OPCIONAL (o pipeline segue com flag NA se ela faltar), então
-# a ausência da chave NÃO derruba o script: avisa e pula os três layers do MT.
 SEMA_MT_AUTHKEY <- Sys.getenv("SEMA_MT_AUTHKEY", unset = NA_character_)
 TEM_SEMA_MT     <- !is.na(SEMA_MT_AUTHKEY) && nzchar(SEMA_MT_AUTHKEY)
 if (!TEM_SEMA_MT) {
@@ -47,11 +38,6 @@ if (!TEM_SEMA_MT) {
 # --- Territórios: quais camadas baixar nesta rodada ---------------------------
 # Decisão da rodada 2026-08-25: seguir só com TI. CNUC (UC) e quilombolas ficam
 # de fora por ora. Basta acrescentar "UC" / "QUILOMBOLA" ao vetor para religar.
-#
-# CONSEQUÊNCIA: sem UC e sem quilombolas, os passos correspondentes do 02 falham
-# (são fontes obrigatórias em FONTES_OBRIGATORIAS, R/utils.R) e o 03 não roda.
-# Isso é intencional — a alternativa seria seguir com camada faltando em
-# silêncio, que é exatamente a classe de falha que a auditoria encontrou.
 BAIXAR_TERRITORIOS <- c("TI")
 
 # Config: ANM ------------------------------------------------------------------
@@ -133,11 +119,7 @@ anm_targets <- purrr::imap(config_anm, \(cfg, name) {
 config_geo <- list(
 
   # --- Territórios ------------------------------------------------------------
-  # REATIVADO em 2026-08 (auditoria F-04). Estava comentado como "suspenso até
-  # dezembro" por diagnóstico errado de indisponibilidade da fonte: o geoserver
-  # da FUNAI recusa o User-Agent padrão do R com 403 e aceita um UA nomeado.
-  # Correção aplicada em R/utils.R (UA_PROJETO). Sem estas três camadas o
-  # 03_recorte_espacial.R não roda.
+  # REATIVADO em 2026-08 (auditoria F-04).
   territorios = list(
     dest = "geo_territorios",
     urls = c(
@@ -173,12 +155,6 @@ config_geo <- list(
   # 2026-08-25). O servidor do IBGE é instável e reorganiza caminhos entre
   # edições, então automatizar aqui geraria falha recorrente sem ganho real.
   #
-  # DECISÃO: ficam como INSUMO MANUAL. Baixar do site do IBGE e extrair nas duas
-  # pastas acima. Está documentado no leia-me. O 03 e o 05 devem verificar a
-  # presença e dizer qual pasta falta -- não descobrir por erro de leitura.
-  #
-  # (A auditoria menciona TRÊS bases; na varredura do código só estas duas
-  # aparecem referenciadas. Se surgir uma terceira, documentar junto.)
 
   # --- IBAMA: fiscalizacao/embargo federal ---------------
   ibama = list(
@@ -226,8 +202,7 @@ sema_urls <- setNames(
   paste0(config_geo$sema_mt$layers, ".zip")
 )
 
-# Territórios: só as camadas escolhidas em BAIXAR_TERRITORIOS, já renomeadas
-# para o nome de arquivo que o 02 procura.
+# Territórios: só as camadas escolhidas em BAIXAR_TERRITORIOS
 camadas_terr <- intersect(BAIXAR_TERRITORIOS, names(config_geo$territorios$urls))
 terr_urls    <- setNames(
   config_geo$territorios$urls[camadas_terr],
@@ -256,8 +231,7 @@ TS_EXECUCAO <- format(Sys.time(), "%Y-%m-%d_%H%M%S")
 # propósitos: (a) confirmar que o UA do projeto é aceito por cada servidor,
 # antes de cair para UA_FALLBACK; (b) pegar URL errada de imediato, em vez de
 # descobrir 40 minutos depois. Não baixa nada e não bloqueia a execução.
-#
-# PRECHECAR_URLS = FALSE pula esta etapa (rodadas repetidas no mesmo dia).
+
 PRECHECAR_URLS <- TRUE
 
 if (PRECHECAR_URLS) {

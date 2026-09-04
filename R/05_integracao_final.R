@@ -1,23 +1,5 @@
 ################################################################################
 # 05_integracao_final.R
-#
-# Municipio (Bloco 4), intersecao espacial TI/UC/Quilombola + embargos
-# (Bloco 5), e preparo do CFEM ate o ponto anterior a correcao de peso/preco
-# (leitura, limpeza, conversao de unidade, aliquota, VALORtot, preco_g_orig).
-#
-# Revisão 2026-08-25 (auditoria Sentinela da Amazônia):
-#   F-02  pma_attrs levava 8 colunas e NENHUMA flag de sobreposição — as flags
-#         eram calculadas, conferidas no QA e não viajavam para a tabela de
-#         CFEM. Como o filtro do dashboard ignora coluna ausente e devolve o
-#         conjunto inteiro, os botões de território não filtravam nada. A lista
-#         de colunas passa a derivar de FLAGS_SOBREPOSICAO (R/utils.R).
-#   F-01  Autos de infração do ICMBio incorporados por sobreposição espacial
-#         única (ponto contra polígono), com contagem, soma de multa,
-#         rastreabilidade por numero_ai e validação cruzada por nome_uc.
-#         Inclui teste de sensibilidade a 500 m (não entra no resultado).
-#   F-05  O CSV de disponibilidade de fontes passa a ser exportado também para
-#         a pasta do dashboard — diagnóstico que fica só em QA é igual a não
-#         existir, e foi por isso que a queda do ICMBio passou despercebida.
 ################################################################################
 
 rm(list = ls(all.names = TRUE))
@@ -174,11 +156,6 @@ qui_amzl    <- qui_amzl |> dplyr::select(nm_comunid)
 
 qui_bf <- terra::buffer(qui_amzl, width = 10000)
 ti_bf  <- terra::buffer(ti_amzl,  width = 10000)
-# Buffer de UC fixo em 2km (decisao 2026-08): antes variava 2km/10km conforme
-# 'pl_manejo' == "SIM", mas esse campo pode vir NA na fonte (o que quebrava o
-# buffer -- ifelse(NA, ...) devolve NA, nao o fallback). Simplificado pra 2km
-# fixo em todas as UC de protecao integral/RESEX ate decidirmos reintroduzir
-# a diferenciacao por plano de manejo com um tratamento de NA explicito.
 uc_bf  <- terra::buffer(uc_pi_resex, width = 2000)
 
 qui_bf_only <- terra::erase(qui_bf, qui_amzl)
@@ -236,8 +213,6 @@ pma_tp1 <- pma_amzl |>
     QUIov = tidyr::replace_na(QUIov, 0L)
   )
 
-# min_prop = 0: proximidade e flag de alerta, nao sobreposicao real -- decisao
-# 2026-08, manter o limiar de 5% so pra dentro da area protegida (acima).
 df_uc_donut <- calc_overlap_named(pma_tp1, uc_bf_only, "UCov2km", "nome_uc", "UCname_ov",
                                   extra_cols = "sigla_snuc", min_prop = 0) |> dplyr::rename(UCtype_ov = sigla_snuc)
 df_ti_donut <- calc_overlap_named(pma_tp1, ti_bf_only, "TIov10km", "terrai_nom", "TIname_ov", min_prop = 0)
@@ -270,20 +245,6 @@ pma_tp$emb_IC  <- relacionar_flag_opcional(pma_tp, EMBic)
 # =============================================================================
 # AUTOS DE INFRACAO DO ICMBIO — SOBREPOSICAO ESPACIAL UNICA (auditoria F-01)
 # =============================================================================
-# Decisao 2026-08-25: a camada ENTRA. O shapefile e de PONTOS (um por auto
-# lavrado), entao o cruzamento e ponto-dentro-do-poligono do processo. O flag
-# binario inf_IC ja sai do relacionar_flag_opcional acima; aqui derivamos o que
-# ele nao da: quantos autos e quanto de multa por processo.
-#
-# Contexto do achado: o terra descartava a camada em silencio e ela nunca
-# contribuiu com nada. Confirmado no cruzamento final -- zero processos
-# sinalizados por esta fonte. Ver 02_pre_proc.R para o inventario do arquivo.
-#
-# TESTE DE SENSIBILIDADE (500 m): a coordenada marca o ponto do auto lavrado,
-# nao o centroide do dano, entao a sobreposicao estrita tende a SUBcontar. O
-# numero com tolerancia NAO entra no resultado -- e so para dimensionar o
-# efeito antes de fixar o criterio. Se a diferenca for marginal, fechamos no
-# estrito com respaldo empirico em vez de escolha default.
 resumir_infracoes_pontos <- function(pma, pts, label = "icmbio_infracoes",
                                      col_valor = "valor_mult", col_id = "numero_ai",
                                      tolerancias_m = c(50, 100, 250, 500, 1000),
@@ -336,10 +297,6 @@ resumir_infracoes_pontos <- function(pma, pts, label = "icmbio_infracoes",
     )
 
   # --- teste de sensibilidade (nao entra no resultado) -----------------------
-  # AMPLIADO 2026-08-25: a primeira rodada testou so 500 m e deu +112% (347 ->
-  # 735 processos). Longe de marginal, entao a curva importa: varios raios
-  # mostram onde ela sobe e se ha patamar. 500 m em area de garimpo ja pode
-  # capturar processo vizinho, entao o numero sozinho nao decide.
   n_estrito <- nrow(resumo)
   curva <- purrr::map_dfr(tolerancias_m, \(w) {
     n <- tryCatch({
@@ -416,9 +373,7 @@ fontes_check <- tibble::tibble(
                 !is.null(INFmtSIGA), !is.null(INFic))
 )
 readr::write_csv(fontes_check, file.path(QA_DIR, "fontes_embargo_infracao_disponibilidade.csv"))
-# Tambem para a pasta do dashboard: diagnostico que fica so em CSV de QA e o
-# mesmo que nao existir. Foi por isso que a queda do ICMBio (F-05) passou
-# despercebida -- o mecanismo de deteccao existia e ninguem leu.
+
 SHINY_DIR_05 <- here::here("data", "result_shiny")
 dir.create(SHINY_DIR_05, recursive = TRUE, showWarnings = FALSE)
 readr::write_csv(fontes_check, file.path(SHINY_DIR_05, "fontes_disponibilidade.csv"))
@@ -429,8 +384,6 @@ if (any(!fontes_check$disponivel)) {
 }
 
 # --- Check/parecer: quantos processos carregam cada flag de sobreposição ------
-# flags_sobrep agora vem de R/utils.R (FLAGS_SOBREPOSICAO), a mesma fonte usada
-# na propagacao de colunas do Bloco 6 -- ver auditoria F-02.
 flags_sobrep <- FLAGS_SOBREPOSICAO
 sobrep_check <- as.data.frame(pma_tp) |>
   dplyr::summarise(dplyr::across(dplyr::all_of(flags_sobrep), ~ sum(.x == 1L, na.rm = TRUE))) |>
@@ -441,9 +394,10 @@ message("[05][sobreposicao] flags de sobreposicao/embargo:")
 print(sobrep_check)
 
 save_ckpt(pma_tp, "05_pma_tp")
+
+# =============================================================================
 # BLOCO 6 — CFEM: LEITURA, LIMPEZA E PREPARO (sem correcao de peso/preco)
 # =============================================================================
-
 processos_amzl <- load_ckpt("03_processos_amzl")
 pma_tp         <- load_ckpt("05_pma_tp")
 
@@ -472,8 +426,6 @@ cfem_arr <- cfem_arr |>
   dplyr::mutate(dplyr::across(dplyr::where(is.character), toupper)) |>
   dplyr::mutate(CPF_CNPJarr = padroniza_doc(CPF_CNPJarr))
 
-# Razao social: primeiro tenta os microdados (fonte oficial, ja no pipeline
-# via 04); CSV auxiliar so entra pra CPF/CNPJ que o microdado nao resolveu.
 pessoa <- arrow::read_parquet(file.path(MICRO_OUT_DIR, "micro_pessoa.parquet")) |>
   dplyr::rename(CPF_CNPJarr = nrcpfcnpj, NOME_arr = nmpessoa) |>
   dplyr::mutate(CPF_CNPJarr = padroniza_doc(CPF_CNPJarr)) |>
@@ -498,9 +450,6 @@ if (!file.exists(razao_social_path)) {
 cfem_arr_pre_fallback <- cfem_arr |>
   dplyr::left_join(pessoa, by = "CPF_CNPJarr")
 
-# Checagem (decisao pendente 2026-08): quantos CPF/CNPJ so ganham nome por
-# causa do CSV auxiliar (fonte fora do 01_download.R)? Se for perto de zero,
-# o fallback pode ser removido -- os microdados (04) ja bastariam sozinhos.
 n_so_fallback <- cfem_arr_pre_fallback |>
   dplyr::filter(is.na(NOME_arr)) |>
   dplyr::distinct(CPF_CNPJarr) |>
@@ -537,15 +486,6 @@ cfem_arr_amzl1 <- cfem_arr_amzl0 |>
   )
 
 # --- Colunas propagadas para a tabela de CFEM (auditoria F-02) ----------------
-# Antes esta selecao levava 8 colunas e NENHUMA flag de sobreposicao. As flags
-# eram calculadas logo acima, conferidas no QA, e simplesmente nao viajavam.
-# Como o filtro do dashboard ignora coluna ausente e devolve o conjunto
-# inteiro, os botoes "Territorios Protegidos" nao davam erro: nao filtravam.
-#
-# A lista NAO e escrita a mao: deriva de flags_sobrep (o mesmo vetor usado no
-# check de QA) mais as colunas de nome/tipo e as derivadas do ICMBio. Assim,
-# incluir uma fonte nova nao depende de alguem lembrar de atualizar um select()
-# -- que foi exatamente como o bug nasceu.
 cols_nomes_terr <- c("UCname", "UCtype", "UCcnuc", "TIname", "QUIname",
                      "UCname_ov", "UCtype_ov", "TIname_ov", "QUIname_ov")
 cols_inf_ic     <- c("inf_IC_n", "inf_IC_multa", "inf_IC_ais", "inf_IC_cnucs",

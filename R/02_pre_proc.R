@@ -1,19 +1,5 @@
 ###############################################################################
 # 02_pre_proc.R - Processing, cleaning, and consolidation
-#
-# Revisão 2026-08 (auditoria Sentinela da Amazônia):
-#   F-01  ICMBio infrações: leitura por ler_vetor() com inventário de
-#         geometrias, descarte explícito dos registros sem geometria (com CSV
-#         em QA), encoding tolerante a byte inválido em desc_ai, colunas
-#         nome_uc/cnuc/numero_ai acrescentadas, e falha se o filtro zerar.
-#   F-05  ICMBio embargos: checagem nomeada de colunas (o relatório apontou
-#         renomeação que NÃO se confirmou na versão 2026-08-04) e tipo_infra
-#         incluído no filtro, padronizando com o bloco de autos do mesmo órgão.
-#   F-07  Máscara de CPF na INGESTÃO em todas as fontes ambientais (ICMBio,
-#         IBAMA, SEMA-MT) — a ANM mascara pessoa física, estas não.
-#   F-04  TI / UC / QUILOMBOLA passam por ler_vetor() como fontes obrigatórias.
-#         Corrigido também o nome fixo shp_cnuc.zip, que não casava com o
-#         arquivo que o 01 baixa (shp_cnuc_2025_08.zip).
 ###############################################################################
 
 # Setup & Configuration -----------------------------------------------------
